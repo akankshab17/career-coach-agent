@@ -1,269 +1,578 @@
-"""Turn search results into a cited, verified markdown brief."""
+"""Write the brief from grounded facts only, then check and render it in code."""
 from __future__ import annotations
 
-import json
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date
 
-import llm
-from search import source_kind
+from facts import HEDGE_WORD_RE, LOWERABLE_STARTERS, NUMBER_RE, REJECT_REASONS, add_hedge
+from search import is_blocked, source_kind
 
-SNIPPET_CHARS = 800  # per source in the writing prompt
-VERIFY_CHARS = 2500  # per source in the fact-check prompt
 JD_URL = "jd://user-provided"
-
 LEVEL_LABEL = {"intern": "intern", "new-grad": "new grad", "experienced": "experienced"}
+KEY_SECTIONS = ("interview", "role")  # TL;DR is built from these; its coverage = the interview count
+DERIVED_SECTIONS = ("how to prepare", "questions to ask")  # may draw conclusions, but must cite facts
+PLACEHOLDER = "No grounded information found for this section."
+NO_INTERVIEW = "No interview reports found."
+STAGE_ORDER = ("oa", "phone-screen", "team-screen", "onsite", "unknown")
+STAGE_LABEL = {"oa": "Online assessment", "phone-screen": "Phone screen", "team-screen": "Team screen",
+               "onsite": "Onsite", "unknown": "Stage not specified"}
+COMPANY_MAX_SENTENCES = 5
+MAX_WRITER_FACTS = 30  # fewer facts = faster, cheaper, and a tighter brief
+COMPANY_FACTS_FOR_WRITER = 10  # at most this many company facts reach the writer...
+COMPANY_FACTS_PER_SOURCE = 3  # ...and at most this many from one article (one news event)
+COMPANY_RESERVE = 5  # company facts are kept even when interview + role facts would fill the budget
 
 SECTION3 = "## 3. What the role really needs"
 SECTION3_INFERRED = "## 3. What the role really needs (Inferred, not from a JD)"
 
-SYSTEM_PROMPT = """You write interview-prep briefs. Rules:
-- Use ONLY the numbered sources provided. Never use outside knowledge.
-- Every factual sentence must end with a citation like [S2] (or [S1][S4]). Cite EACH sentence and
-  EACH bullet on its own; do not cite once for a whole list.
-- If a claim is not supported by a source, leave it out. Do not guess. Questions to ask the
-  interviewer do not need citations.
-- If a section has no supporting sources, write "No supported information found."
-- Sources are tagged with a kind and a published date. Prefer company and reputable sources.
-- Sources tagged FORUM (Reddit, Blind, LeetCode discuss...) are anecdotes: phrase every claim from them
-  as "Candidates report ..." and never state it as established fact.
-- Recent news: put the date from the source's Published field next to each item, like (Feb 2026).
-  Use "(date unknown)" if the source has none. Prefer sources from the last 12 months.
-- If sources conflict (e.g. different figures), use the NEWEST source and say so explicitly,
-  e.g. "Earlier reports said X [S1], but a newer source says Y [S2]."
-- Tailor interview, preparation and questions to the candidate's level; skip details that clearly
-  refer to a different level.
-- Output markdown with exactly the headings requested, in order."""
-
-VERIFY_SYSTEM_PROMPT = """You are a strict fact-checker. You get source texts and numbered claims, each citing sources.
-A claim is SUPPORTED only if the cited source text directly states every factual part of it
-(figures, dates, names, who said what). Inference, extrapolation or partial support = unsupported.
-Reply with JSON only, no prose: {"unsupported": [<claim numbers>]}. Use [] if all are supported."""
-
 
 # ---------- sources ----------
 
+def add_sources(sources: dict[str, dict], results: list[dict], group: str, company: str) -> list[str]:
+    """Add results under new ids S<n> (skipping known URLs). Returns the new ids."""
+    known = {s["url"] for s in sources.values()}
+    new_ids = []
+    for r in results:
+        if r["url"] in known or is_blocked(r["url"]):
+            continue
+        known.add(r["url"])
+        sid = f"S{len(sources) + 1}"
+        kind = "jd" if r["url"] == JD_URL else source_kind(r["url"], company)
+        sources[sid] = {**r, "kind": kind, "group": group}
+        new_ids.append(sid)
+    return new_ids
+
+
 def collect_sources(research: dict[str, list[dict]], company: str, jd: str | None = None) -> dict[str, dict]:
-    """Dedupe results by URL and give each an id: S1, S2, ... The JD (if any) is a source too."""
-    groups = dict(research)
-    if jd:
-        groups["jd"] = [{"title": "Job description provided by you", "url": JD_URL, "content": jd, "published_date": None}]
+    """Number every search result S1, S2, ... (deduped by URL). The JD, if given, is a source too."""
     sources: dict[str, dict] = {}
-    seen: set[str] = set()
-    for results in groups.values():
-        for r in results:
-            if r["url"] in seen:
-                continue
-            seen.add(r["url"])
-            kind = "jd" if r["url"] == JD_URL else source_kind(r["url"], company)
-            sources[f"S{len(seen)}"] = {**r, "kind": kind}
+    for group, results in research.items():
+        if group != "filtered":  # filtered holds {url, title, reason} notes, not sources
+            add_sources(sources, results, group, company)
+    if jd:
+        add_sources(sources, [{"title": "Job description provided by you", "url": JD_URL, "content": jd,
+                               "published_date": None, "full_text": jd}], "jd", company)
     return sources
 
 
-def _source_header(sid: str, s: dict) -> str:
-    return f"[{sid}] {s['title']}\nKind: {s['kind'].upper()} | Published: {s['published_date'] or 'unknown'} | URL: {s['url']}"
+# ---------- run stats + debug report ----------
+
+@dataclass
+class Drop:
+    section: str
+    sentence: str
+    code: str
+    detail: str = ""
 
 
-def build_prompts(company, role, level, jd, research, sources, today: date) -> tuple[str, str]:
-    posting = research.get("posting") or []
-    posting_url = posting[0]["url"] if posting else None
-    has_jd = bool(jd) or bool(posting)
-    s3 = SECTION3 if has_jd else SECTION3_INFERRED
-    if jd:
-        s3_rule = "Base section 3 ONLY on the job description source (kind JD)."
-    elif posting:
-        s3_rule = f"Base section 3 ONLY on the single job posting {posting_url}. Ignore all other sources there."
-    else:
-        s3_rule = "No job posting was found, so section 3 is inferred from the other sources; keep the heading exactly as given."
-    source_text = "\n\n".join(f"{_source_header(sid, s)}\n{s['content'][:SNIPPET_CHARS]}" for sid, s in sources.items())
-    jd_note = "" if not jd else "\n(The user's job description is source JD below.)"
-    user = f"""Today's date: {today.isoformat()}
-Company: {company}
-Role: {role}
-Candidate level: {LEVEL_LABEL[level]}{jd_note}
-
-Sources:
-{source_text}
-
-{s3_rule}
-
-Write the brief with these headings exactly, in this order:
-## TL;DR
-(exactly 3 bullets: the most important things to know, each cited)
-## 1. Company overview + recent news
-## 2. Interview process + common questions
-{s3}
-## 4. How to prepare
-(specific practice items grounded in the sources, e.g. a named problem type or topic, each cited)
-## 5. Questions to ask the interviewer
-(tailored to a {LEVEL_LABEL[level]} candidate)"""
-    return SYSTEM_PROMPT, user
-
-
-# ---------- verification ----------
-
-CITE_RE = re.compile(r"\[(S\d+)\]")
-SENT_RE = re.compile(r".+?(?:[.!?](?:\s*\[S\d+\])*(?=\s|$)|$)")  # sentence + its trailing citations
-LINE_PREFIX_RE = re.compile(r"^(\s*(?:[*\-]|\d+\.)\s+)?(.*)$", re.S)
-ATTRIBUTED_RE = re.compile(r"\bcandidates?\b[^.]{0,30}\b(report|said|say|mention|describe|share|recall)|reported by candidates", re.I)
+REWRITE_KINDS = {
+    "candidates-report": "forum fact rewritten to start with 'Candidates report'",
+    "hedge-added": "fact from a hedged source ('may', 'reportedly'...) given its hedge back",
+    "stage-split": "sentence mixed facts from different interview stages; split into one sentence per fact",
+    "stage-trim": "TL;DR bullet mixed interview stages; trimmed to its first fact",
+}
 
 
 @dataclass
-class VerifyStats:
+class Rewrite:
+    section: str
+    before: str
+    after: str
+    kind: str = "candidates-report"
+
+
+DROP_REASONS = {
+    "uncited": "sentence cites no grounded fact",
+    "unknown-fact": "cites only fact ids that don't exist",
+    "number-not-in-facts": "contains a number that isn't in the facts it cites",
+    "tldr-interview-without-interview-fact": "TL;DR interview claim not backed by an interview fact",
+    "company-section-cap": f"company section already has {COMPANY_MAX_SENTENCES} sentences",
+    "question-logistics-or-rumor": "question about interview logistics, or based on a rumor/unconfirmed/interview fact",
+}
+
+
+@dataclass
+class RunStats:
+    steps: list[str] = field(default_factory=list)  # one line per graph step, as printed
+    sources_total: int = 0
+    sources_with_text: int = 0
+    facts_extracted: int = 0
+    facts_grounded: int = 0
+    rejected: list[dict] = field(default_factory=list)
+    extract_errors: list[tuple[str, str]] = field(default_factory=list)
+    retry_sections: list[str] = field(default_factory=list)
+    per_source: dict[str, dict] = field(default_factory=dict)  # sid -> url, text kind, extracted/grounded/rejected
+    grounded: list[dict] = field(default_factory=list)
+    filtered: list[dict] = field(default_factory=list)  # irrelevant interview results: {url, title, reason}
+    draft: str = ""  # the writer's raw output, before any checking
+    draft_truncated: bool = False
+    selected: int = 0
     checked: int = 0
-    dropped_uncited: int = 0
-    dropped_unsupported: int = 0
-    dropped_forum: int = 0
-    verified: bool = True
+    drops: list[Drop] = field(default_factory=list)
+    rewrites: list[Rewrite] = field(default_factory=list)
+
+    def pipeline_line(self) -> str:
+        retry = f"yes ({', '.join(self.retry_sections)})" if self.retry_sections else "no"
+        return (
+            f"[pipeline] sources={self.sources_total} with_text={self.sources_with_text} "
+            f"extracted={self.facts_extracted} grounded={self.facts_grounded} rejected={len(self.rejected)} retry={retry}"
+        )
 
     @property
-    def dropped(self) -> int:
-        return self.dropped_uncited + self.dropped_unsupported + self.dropped_forum
+    def contributing_sources(self) -> int:
+        """Sources that gave at least one grounded fact (full pages and snippets alike)."""
+        return len({f["source_id"] for f in self.grounded})
+
+    def writing_breakdown(self) -> str:
+        counts = Counter(d.code for d in self.drops)
+        parts = ", ".join(f"{counts[c]} {c}" for c in DROP_REASONS if counts[c])
+        text = f"{self.checked} sentences checked, {len(self.drops)} dropped" + (f" ({parts})" if parts else "")
+        if self.rewrites:
+            kinds = Counter(r.kind for r in self.rewrites)
+            text += f", {len(self.rewrites)} rewritten (" + ", ".join(f"{n} {k}" for k, n in kinds.items()) + ")"
+        return text
 
     def log_line(self) -> str:
-        if not self.verified:
-            return "[verify] FAILED: brief is UNVERIFIED"
-        return (
-            f"[verify] {self.checked} sentences checked, {self.dropped} dropped "
-            f"({self.dropped_unsupported} unsupported, {self.dropped_uncited} uncited, "
-            f"{self.dropped_forum} forum claims not phrased as 'candidates report')"
-        )
+        return f"[finalize] {self.writing_breakdown()}"
+
+    def debug_report(self, sources: dict | None = None) -> str:
+        """Markdown: step counts, every rejected fact, every dropped/rewritten sentence."""
+        def url(sid):
+            return (sources or {}).get(sid, {}).get("url", sid)
+
+        lines = ["# Run report", "", *[f"- `{s}`" for s in self.steps], ""]  # steps already end with finalize + pipeline
+
+        if self.per_source:
+            lines += ["# Facts per source", "", "| source | text | chars | extracted | grounded (by section) | rejected | error |",
+                      "|---|---|---|---|---|---|---|"]
+            for sid, row in self.per_source.items():
+                by_section = ", ".join(f"{sec} {n}" for sec, n in row["grounded"].items()) or "0"
+                lines.append(f"| {sid} {row['url']} | {row['text']} | {row['chars']} | {row['extracted']} | "
+                             f"{by_section} | {row['rejected']} | {row['error']} |")
+            lines.append("")
+
+        if self.filtered:
+            lines += [f"# Filtered interview sources ({len(self.filtered)})", ""]
+            lines += [f"- [{f['reason']}] {f['title']} — {f['url']}" for f in self.filtered] + [""]
+
+        if self.grounded:
+            lines += ["# Grounded facts", ""]
+            for f in self.grounded:
+                tag = " [snippet-grounded]" if f.get("grounded_in") == "snippet" else ""
+                tag += " [hedged source]" if f.get("hedged") else ""
+                where = f"{f['section']}/{f['stage']}" if f.get("stage") else f["section"]
+                lines.append(f"- ({where}, {f['source_id']}){tag} {f['fact']}")
+            lines.append("")
+
+        lines += ["# Rejected facts (grounding)", ""]
+        if not self.rejected:
+            lines.append("None.")
+        for n, r in enumerate(self.rejected, 1):
+            lines += [
+                f"## {n}. [{r['reason']}] {REJECT_REASONS.get(r['reason'], '')}",
+                f"- Fact: {r.get('fact')}",
+                f"- Quote: \"{r.get('exact_quote')}\"",
+                f"- Section: {r.get('section')} | Source: {url(r.get('source_id'))}",
+                "",
+            ]
+        if self.extract_errors:
+            lines += ["# Extraction errors", ""] + [f"- {u}: {e}" for u, e in self.extract_errors] + [""]
+
+        lines += ["# Dropped sentences (writing)", ""]
+        if not self.drops:
+            lines.append("None.")
+        for n, d in enumerate(self.drops, 1):
+            lines += [f"## {n}. [{d.code}] in \"{d.section}\"", f"> {d.sentence}", "",
+                      f"- Reason: {DROP_REASONS[d.code]}" + (f": {d.detail}" if d.detail else ""), ""]
+        if self.rewrites:
+            lines += ["", "# Rewritten sentences (kept)", ""]
+            for r in self.rewrites:
+                lines += [f"- [{r.kind}] in \"{r.section}\"", f"  - Before: {r.before}", f"  - After: {r.after}"]
+        if self.draft:
+            lines += ["", "# Writer draft (raw, before checking)", "",
+                      f"Draft cut off by the token limit: {'YES' if self.draft_truncated else 'no'}", "", "```", self.draft.strip(), "```"]
+        return "\n".join(lines) + "\n"
 
 
 @dataclass
 class BriefResult:
     text: str
-    stats: VerifyStats = field(default_factory=VerifyStats)
+    stats: RunStats
+    sources: dict = field(default_factory=dict)
+
+
+# ---------- writing ----------
+
+SYSTEM_PROMPT = """You write interview-prep briefs for students from a list of verified facts.
+Rules:
+- Use ONLY the numbered facts given. No outside knowledge. Do not add numbers, names, durations or
+  details that the fact doesn't contain.
+- One fact per sentence, except: combine closely related facts about the same event into one sentence
+  citing all of them. Every sentence ends with the fact id(s) it states, like [F3] or [F3][F7].
+- Never write "the acquisition", "the deal", "the company" etc. without naming what it is in that sentence.
+- Facts marked FORUM are anecdotes: start those sentences with "Candidates report".
+- Facts marked HEDGED come from a source that is unconfirmed ("may", "reportedly"). Keep the hedge in your
+  sentence (e.g. "Reportedly, ..."); never state them as completed or certain.
+- Interview facts carry a stage (oa, phone-screen, team-screen, onsite, unknown). NEVER combine facts from
+  different stages in one sentence, anywhere in the brief.
+- For company news with a published date, add "(reported Mon YYYY)" from that date.
+- If two facts conflict, use the newer one and say so, citing both.
+- "How to prepare" and "Questions to ask" may draw conclusions from the facts, but every item must cite
+  the fact(s) it is based on.
+- Never omit a section. If a section has no facts, write exactly: "No grounded information found for this section."
+- Output markdown with exactly the headings requested, in order."""
+
+
+def _round_robin_by_source(facts: list[dict], per_source: int | None = None) -> list[dict]:
+    """Interleave facts across sources (each source's own order kept) so one long page can't eat the budget."""
+    queues: dict[str, list[dict]] = {}
+    for f in facts:
+        queues.setdefault(f["source_id"], []).append(f)
+    out, rnd = [], 0
+    while True:
+        batch = [q[rnd] for q in queues.values() if rnd < len(q) and (per_source is None or rnd < per_source)]
+        if not batch:
+            return out
+        out += batch
+        rnd += 1
+
+
+def select_for_writing(facts: list[dict], limit: int = MAX_WRITER_FACTS) -> list[dict]:
+    """At most `limit` facts for the writer. Posting/role and interview facts come first; company facts get
+    what is left, but never fewer than COMPANY_RESERVE (so section 1 isn't empty). Each group is interleaved
+    across its sources. Returned in original order, so fact ids are stable."""
+    company = _round_robin_by_source([f for f in facts if f["section"] == "company"], COMPANY_FACTS_PER_SOURCE)
+    interview = _round_robin_by_source([f for f in facts if f["section"] == "interview"])
+    role = _round_robin_by_source([f for f in facts if f["section"] == "role"])
+
+    reserve = min(COMPANY_RESERVE, len(company))
+    room = limit - reserve
+    interview_quota = min(len(interview), -(-room * 3 // 5))  # ~60% of the non-company room
+    role_quota = min(len(role), room - interview_quota)
+    interview_quota = min(len(interview), room - role_quota)  # unused role room flows to interview
+    chosen = interview[:interview_quota] + role[:role_quota]
+    company_room = min(COMPANY_FACTS_FOR_WRITER, limit - len(chosen))
+    chosen += company[:max(company_room, reserve)]
+    keep = {id(f) for f in chosen}
+    return [f for f in facts if id(f) in keep]
+
+
+def fact_ids(facts: list[dict]) -> dict[str, dict]:
+    return {f"F{i}": f for i, f in enumerate(facts, 1)}
+
+
+def _fact_line(fid: str, f: dict) -> str:
+    tags = [f"source {f['source_id']}"]
+    if f.get("stage"):
+        tags.append(f"stage {f['stage']}")
+    if f["is_forum"]:
+        tags.append("FORUM")
+    if f.get("hedged"):
+        tags.append("HEDGED")
+    if f.get("published_date"):
+        tags.append(f"published {f['published_date']}")
+    return f"[{fid}] ({', '.join(tags)}) {f['fact']}  | quote: \"{f['exact_quote']}\""
+
+
+def has_role_document(sources: dict) -> bool:
+    """True if section 3 can come from a real JD or posting (not inferred)."""
+    return any(s.get("group") in ("posting", "role", "jd") and s.get("full_text") for s in sources.values())
+
+
+def build_writer_prompt(company, role, level, facts: list[dict], sources: dict, today: date) -> tuple[str, str]:
+    by_id = fact_ids(facts)
+    blocks = []
+    for section in ("company", "interview", "role"):
+        if section == "interview":  # grouped by stage, in interview order
+            lines = [_fact_line(fid, f) for stage in STAGE_ORDER for fid, f in by_id.items()
+                     if f["section"] == "interview" and f["stage"] == stage]
+        else:
+            lines = [_fact_line(fid, f) for fid, f in by_id.items() if f["section"] == section]
+        blocks.append(f"### {section} facts\n" + ("\n".join(lines) if lines else "(none)"))
+    stage_labels = ", ".join(f'"{STAGE_LABEL[s]}"' for s in STAGE_ORDER)
+    s3 = SECTION3 if has_role_document(sources) else SECTION3_INFERRED
+    label = LEVEL_LABEL[level]
+    if any(f["section"] == "interview" for f in facts):
+        tldr_rule = ("exactly 3 bullets, ONLY from interview facts, no company news: 1) FORMAT: how the interview is "
+                     "structured, from facts of ONE stage (the most informative one); 2) KEY TOPICS: what is asked, "
+                     f"from facts of ONE stage; 3) STANDOUT INSIGHT: one surprising or useful fact a {label} candidate "
+                     "should know. A bullet never mixes stages.")
+    else:
+        tldr_rule = (f'there are NO interview facts. First bullet exactly: "{NO_INTERVIEW}" Then at most 2 bullets '
+                     "from role facts about what the role needs. Never describe interview stages or format.")
+    facts_text = "\n\n".join(blocks)
+    user = f"""Today's date: {today.isoformat()}
+Company: {company}
+Role: {role}
+Candidate level: {label}
+
+Facts:
+{facts_text}
+
+Write the brief with these headings exactly, in this order:
+## TL;DR
+({tldr_rule})
+## 1. Company overview + recent news
+(at most {COMPANY_MAX_SENTENCES} sentences; at most 1-2 sentences per news event; merge related facts, e.g.
+"Stripe agreed to acquire AI gateway OpenRouter for over $7 billion (reported Aug 2026) [F9][F10].")
+## 2. Interview process + common questions
+(group by stage: for each stage that has facts, in this order, write a bold label line, then one bullet per
+fact or per small group of facts from THAT stage only. Labels in order: {stage_labels}. Skip stages with no facts.)
+{s3}
+(role facts)
+## 4. How to prepare
+(4-6 numbered practice items, each derived from interview or role facts and citing them)
+## 5. Questions to ask the interviewer
+(3-5 numbered questions tailored to a {label} candidate about the team, the work, learning and growth, and the
+role, each citing a role or confirmed company fact. NEVER ask about interview logistics (rounds, scheduling,
+timeline, next steps), rumors, or unconfirmed/HEDGED news.)"""
+    return SYSTEM_PROMPT, user
+
+
+# ---------- finalize (code only) ----------
+
+# The writer's citation style varies by model: [F1], [F1, F2], [F1-F3], (F1), 【F1】, or a bare "F1" at the end of a sentence.
+_ID = r"F\s?\d+"
+_ITEM = rf"{_ID}(?:\s*[-–—]\s*F?\s?\d+)?"  # F3 or F1-F3
+_SEP = r"(?:\s*[,;&、，]\s*|\s+and\s+|\s+)"
+CITE_GROUP_RE = re.compile(rf"[\[(（【〔]\s*({_ITEM}(?:{_SEP}{_ITEM})*)\s*[\])）】〕]", re.I)
+BARE_CITE_RE = re.compile(rf"(?<![\w\[])F\d+(?:(?:\s*[,;]\s*|\s+and\s+|\s+)F\d+)*(?=[ \t]*(?:[.!?]|$))", re.M)
+MAX_RANGE = 60
+
+
+def _expand(items: str) -> list[int]:
+    nums: list[int] = []
+    for item in re.findall(_ITEM, items, re.I):
+        found = [int(n) for n in re.findall(r"\d+", item)]
+        if len(found) == 2 and found[0] <= found[1] <= found[0] + MAX_RANGE:
+            nums += range(found[0], found[1] + 1)
+        else:
+            nums += found[:1]
+    return nums
+
+
+def normalize_citations(body: str, n_facts: int) -> str:
+    """Rewrite every citation variant to canonical [F1][F2]. Bare ids ("... rounds F3.") are only
+    converted when they are real fact ids, at the end of a sentence."""
+    body = CITE_GROUP_RE.sub(lambda m: "".join(f"[F{n}]" for n in _expand(m.group(1))), body)
+
+    def bare(m: re.Match) -> str:
+        nums = [int(n) for n in re.findall(r"\d+", m.group(0))]
+        return "".join(f"[F{n}]" for n in nums) if all(1 <= n <= n_facts for n in nums) else m.group(0)
+
+    return BARE_CITE_RE.sub(bare, body)
+
+
+CITE_RE = re.compile(r"\[(F\d+)\]")
+SENT_RE = re.compile(r".+?(?:[.!?](?:\s*\[F\d+\])*(?=\s|$)|$)")  # sentence + its trailing citations
+LINE_PREFIX_RE = re.compile(r"^(\s*(?:[*\-]|\d+\.)\s+)?(.*)$", re.S)
+NUMBERED_RE = re.compile(r"^(\s*)\d+\.(\s+)")
+REPORTED_RE = re.compile(r"\(reported [^)]*\)", re.I)
+ATTRIBUTED_RE = re.compile(r"\bcandidates?\b[^.]{0,30}\b(report|said|say|mention|describe|share|recall)|reported by candidates", re.I)
+STAGE_LABEL_LINE_RE = re.compile(r"^\*\*[^*]+\*\*:?$")  # a bold stage label like "**Phone screen**"
+LOGISTICS_RE = re.compile(r"\b(interviews?|rounds?|schedul\w*|timeline|next steps?|hear back|screens?|assessments?|onsite|on-site|how long)\b", re.I)
+
+
+def fact_sentence(fid: str, f: dict) -> str:
+    """A fact as its own cited sentence."""
+    return f"{f['fact'].rstrip('. ')} [{fid}]."
+
+
+def attribute_to_candidates(sentence: str) -> str:
+    """Rewrite an unattributed forum sentence to start with 'Candidates report'. Keeps proper nouns intact."""
+    head, _, rest = sentence.partition(" ")
+    if head in LOWERABLE_STARTERS and rest:
+        return f"Candidates report that {head.lower()} {rest}"
+    return f"Candidates report: {sentence}"
 
 
 def _is_exempt(sentence: str) -> bool:
-    """Questions and lead-ins ending in ':' make no factual claim, so they need no citation."""
+    """Lead-ins ending in ':' and the empty-section placeholder need no citation."""
     t = sentence.strip()
-    return t.endswith("?") or t.endswith(":")
+    return t.endswith(":") or t == PLACEHOLDER or bool(STAGE_LABEL_LINE_RE.match(t))
 
 
 def _parse(body: str) -> list[dict]:
-    """Split body into lines; prose lines become {prefix, sents} so sentences can be dropped one by one."""
-    lines = []
+    """Lines; prose lines become {prefix, sents, section} so sentences can be dropped one by one."""
+    lines, section = [], ""
     for raw in body.splitlines():
+        if raw.lstrip().startswith("#"):
+            section = raw.lstrip("# ").strip()
         if not raw.strip() or raw.lstrip().startswith("#") or set(raw.strip()) <= set("-*_ "):
             lines.append({"raw": raw})
             continue
         m = LINE_PREFIX_RE.match(raw)
         sents = [x.strip() for x in SENT_RE.findall(m.group(2)) if x.strip()]
-        lines.append({"prefix": m.group(1) or "", "sents": sents})
+        lines.append({"prefix": m.group(1) or "", "sents": sents, "section": section})
     return lines
 
 
-def _verify_call(claims: dict[int, str], sources: dict, ids: set[str]) -> set[int]:
-    source_text = "\n\n".join(
-        f"{_source_header(sid, sources[sid])}\n{sources[sid]['content'][:VERIFY_CHARS]}" for sid in sorted(ids, key=lambda x: int(x[1:]))
-    )
-    claim_text = "\n".join(f"[{n}] {text}" for n, text in claims.items())
-    out = llm.generate(VERIFY_SYSTEM_PROMPT, f"Sources:\n{source_text}\n\nClaims:\n{claim_text}")
-    m = re.search(r"\{.*\}", out, re.S)
-    data = json.loads(m.group(0)) if m else None
-    if not isinstance(data, dict) or not isinstance(data.get("unsupported"), list):
-        raise ValueError("verifier did not return the expected JSON")
-    return {int(n) for n in data["unsupported"]}
+INTERVIEW_WORDS_RE = re.compile(r"interview|\brounds?\b|\bstages?\b|screen|onsite|on-site|assessment|\bOA\b|\bloop\b", re.I)
 
 
-def verify_body(body: str, sources: dict) -> tuple[str, VerifyStats]:
-    """Drop every sentence that is uncited, mis-attributed (forum) or not supported by its cited source."""
-    stats = VerifyStats()
+def check_body(body: str, facts: list[dict], stats: RunStats, sources: dict | None = None) -> str:
+    """Drop sentences that cite no real fact, add numbers, or overclaim; rewrite unattributed forum facts;
+    cap the company section; make sure all six sections exist, in order; renumber lists."""
+    by_id = fact_ids(facts)
+    body = normalize_citations(body, len(facts))
     lines = _parse(body)
-    to_check: dict[int, str] = {}
-    where: dict[int, tuple[int, int]] = {}
-    drop: set[tuple[int, int]] = set()
+    company_sentences = 0
 
-    for li, line in enumerate(lines):
-        for si, sent in enumerate(line.get("sents", [])):
-            stats.checked += 1
-            ids = [i for i in CITE_RE.findall(sent) if i in sources]
-            if not CITE_RE.findall(sent):
-                if not _is_exempt(sent):
-                    drop.add((li, si)); stats.dropped_uncited += 1
-                continue
-            if not ids:
-                drop.add((li, si)); stats.dropped_unsupported += 1
-                continue
-            if all(sources[i]["kind"] == "forum" for i in ids) and not ATTRIBUTED_RE.search(sent):
-                drop.add((li, si)); stats.dropped_forum += 1
-                continue
-            n = len(to_check)
-            to_check[n] = sent
-            where[n] = (li, si)
-
-    if to_check:
-        cited = {i for sent in to_check.values() for i in CITE_RE.findall(sent) if i in sources}
-        try:
-            for n in _verify_call(to_check, sources, cited):
-                if n in where:
-                    drop.add(where[n]); stats.dropped_unsupported += 1
-        except (ValueError, json.JSONDecodeError):
-            stats.verified = False  # keep the brief, but say loudly that it was not checked
-
-    out: list[str] = []
-    for li, line in enumerate(lines):
-        if "raw" in line:
-            out.append(line["raw"])
+    for line in lines:
+        if "sents" not in line:
             continue
-        kept = [s for si, s in enumerate(line["sents"]) if (li, si) not in drop]
-        if kept:
-            out.append(line["prefix"] + " ".join(kept))
-    return _fill_empty_sections("\n".join(out)), stats
+        section = line["section"]
+        derived = any(d in section.lower() for d in DERIVED_SECTIONS)
+        is_tldr = section.lower().startswith("tl;dr")
+        is_company = section.startswith("1.")
+        is_questions = "questions to ask" in section.lower()
+        kept = []
+
+        def process(sent: str) -> None:
+            nonlocal company_sentences
+            cited = CITE_RE.findall(sent)
+            valid = [i for i in cited if i in by_id]
+            if is_questions and (LOGISTICS_RE.search(CITE_RE.sub("", sent)) or any(
+                    by_id[i]["section"] == "interview" or by_id[i].get("hedged") for i in valid)):
+                stats.drops.append(Drop(section, sent, "question-logistics-or-rumor"))
+                return
+            if not cited:
+                if _is_exempt(sent):
+                    kept.append(sent)
+                else:
+                    stats.drops.append(Drop(section, sent, "uncited"))
+                return
+            if not valid:
+                stats.drops.append(Drop(section, sent, "unknown-fact", ", ".join(cited)))
+                return
+            sent = CITE_RE.sub(lambda m: m.group(0) if m.group(1) in by_id else "", sent)
+            fact_text = " ".join(by_id[i]["fact"] + " " + by_id[i]["exact_quote"] for i in valid)
+            claim = REPORTED_RE.sub("", CITE_RE.sub("", sent))
+            missing = [n for n in NUMBER_RE.findall(claim) if n not in NUMBER_RE.findall(fact_text)]
+            if missing:
+                stats.drops.append(Drop(section, sent, "number-not-in-facts", ", ".join(missing)))
+                return
+            if is_tldr and INTERVIEW_WORDS_RE.search(CITE_RE.sub("", sent)) and not any(
+                    by_id[i]["section"] == "interview" for i in valid):
+                stats.drops.append(Drop(section, sent, "tldr-interview-without-interview-fact"))
+                return
+            if is_company:
+                if company_sentences >= COMPANY_MAX_SENTENCES:
+                    stats.drops.append(Drop(section, sent, "company-section-cap"))
+                    return
+                company_sentences += 1
+            if any(by_id[i].get("hedged") for i in valid) and not HEDGE_WORD_RE.search(claim):
+                new = add_hedge(sent)
+                stats.rewrites.append(Rewrite(section, sent, new, "hedge-added"))
+                sent = new
+            if not derived and all(by_id[i]["is_forum"] for i in valid) and not ATTRIBUTED_RE.search(sent):
+                new = attribute_to_candidates(sent)
+                stats.rewrites.append(Rewrite(section, sent, new, "candidates-report"))
+                sent = new
+            kept.append(sent)
+
+        for sent in line["sents"]:
+            stats.checked += 1
+            valid = [i for i in CITE_RE.findall(sent) if i in by_id]
+            stages = {by_id[i]["stage"] for i in valid if by_id[i]["section"] == "interview" and by_id[i]["stage"] != "unknown"}
+            if len(stages) > 1 and not derived:  # facts from different interview stages must not share a sentence
+                if is_tldr:  # one bullet = one fact's worth; keep the first
+                    new = fact_sentence(valid[0], by_id[valid[0]])
+                    stats.rewrites.append(Rewrite(section, sent, new, "stage-trim"))
+                    process(new)
+                else:
+                    pieces = [fact_sentence(i, by_id[i]) for i in dict.fromkeys(valid)]
+                    stats.rewrites.append(Rewrite(section, sent, " ".join(pieces), "stage-split"))
+                    for piece in pieces:
+                        process(piece)
+            else:
+                process(sent)
+        line["sents"] = kept
+
+    out, counter = [], 0
+    for line in lines:
+        if "raw" in line:
+            if line["raw"].lstrip().startswith("#"):
+                counter = 0
+            out.append(line["raw"])
+        elif line["sents"]:
+            prefix = line["prefix"]
+            if NUMBERED_RE.match(prefix):  # renumber lists so drops don't leave gaps
+                counter += 1
+                prefix = NUMBERED_RE.sub(lambda m: f"{m.group(1)}{counter}.{m.group(2)}", prefix)
+            out.append(prefix + " ".join(line["sents"]))
+    s3 = SECTION3 if sources is None or has_role_document(sources) else SECTION3_INFERRED
+    has_interview = any(f["section"] == "interview" for f in facts)
+    return ensure_sections("\n".join(out), s3, has_interview)
 
 
-def _fill_empty_sections(body: str) -> str:
-    parts = re.split(r"(?m)^(##? .*)$", body)  # [pre, heading, text, heading, text, ...]
-    for i in range(2, len(parts), 2):
-        if not parts[i].strip(" \n-*_"):
-            parts[i] = "\nNo supported information found.\n"
-    return re.sub(r"\n{3,}", "\n\n", "".join(parts))
+def _section_index(heading: str) -> int | None:
+    """Which of the six sections a writer heading is: TL;DR -> 0, '3. ...' -> 3. None if unrecognised."""
+    h = heading.strip().lower()
+    if h.startswith("tl;dr") or h.startswith("tldr"):
+        return 0
+    m = re.match(r"(\d)\.", h)
+    return int(m.group(1)) if m and 1 <= int(m.group(1)) <= 5 else None
 
 
-# ---------- rendering ----------
+def ensure_sections(body: str, s3_heading: str, has_interview_facts: bool) -> str:
+    """Re-emit the six sections in order under their canonical headings. A missing or empty section
+    (e.g. the writer's output was cut off) gets a placeholder instead of disappearing."""
+    headings = ["## TL;DR", "## 1. Company overview + recent news", "## 2. Interview process + common questions",
+                s3_heading, "## 4. How to prepare", "## 5. Questions to ask the interviewer"]
+    content = [""] * 6
+    parts = re.split(r"(?m)^##\s+(.*)$", body)  # [pre, heading, text, heading, text, ...]
+    for i in range(1, len(parts), 2):
+        idx = _section_index(parts[i])
+        if idx is not None:
+            content[idx] += parts[i + 1]
+    if not has_interview_facts and NO_INTERVIEW not in content[0]:
+        content[0] = f"\n- {NO_INTERVIEW}" + content[0]
+    out = []
+    for heading, text in zip(headings, content):
+        text = text.strip("\n")
+        out.append(f"{heading}\n{text if text.strip(' -*_') else PLACEHOLDER}")
+    return "\n\n".join(out) + "\n"
 
-def render(body: str, sources: dict) -> tuple[str, list[dict]]:
-    """Number citations by first use, link them to real URLs, and keep only the sources actually cited."""
+
+def render(body: str, facts: list[dict], sources: dict) -> tuple[str, list[dict]]:
+    """Turn [F3][F7] into numbered source links (one per source), numbered by first use."""
+    by_id = fact_ids(facts)
     order: dict[str, int] = {}
-    for sid in CITE_RE.findall(body):
-        if sid in sources and sid not in order:
-            order[sid] = len(order) + 1
 
     def repl(m: re.Match) -> str:
-        sid = m.group(1)
-        if sid not in order:
-            return ""  # citation to a source that doesn't exist
-        url = sources[sid]["url"]
-        return f"[{order[sid]}]" if url == JD_URL else f"[{order[sid]}]({url})"
+        sids: list[str] = []
+        for fid in CITE_RE.findall(m.group(0)):
+            sid = by_id[fid]["source_id"]
+            if sid not in sids:
+                sids.append(sid)
+        links = []
+        for sid in sids:
+            order.setdefault(sid, len(order) + 1)
+            url = sources[sid]["url"]
+            links.append(f"[{order[sid]}]" if url == JD_URL else f"[{order[sid]}]({url})")
+        return "".join(links)
 
-    cited = [sources[sid] for sid in order]
-    return CITE_RE.sub(repl, body), cited
+    text = re.sub(r"\[F\d+\](?:\s*\[F\d+\])*", repl, body)
+    return text, [sources[sid] for sid in order]
 
 
-def generate_brief(company: str, role: str, level: str, jd: str | None, research: dict, today: date | None = None) -> BriefResult:
-    today = today or date.today()
-    sources = collect_sources(research, company, jd)
-    system_prompt, user_prompt = build_prompts(company, role, level, jd, research, sources, today)
-    body = llm.generate(system_prompt, user_prompt)
-
-    body, stats = verify_body(body, sources)
-    body, cited = render(body, sources)
-
+def finalize_brief(company, role, level, body: str, facts: list[dict], sources: dict, stats: RunStats) -> BriefResult:
+    body = check_body(body, facts, stats, sources)
+    body, cited = render(body, facts, sources)
     lines = []
     for n, s in enumerate(cited, 1):
         if s["url"] == JD_URL:
             lines.append(f"{n}. Job description provided by you")
         else:
-            date_part = f" ({s['published_date']})" if s["published_date"] else ""
+            date_part = f" ({s['published_date']})" if s.get("published_date") else ""
             lines.append(f"{n}. {s['title']} — {s['url']}{date_part}")
-    footer = "\n\n## Sources\n" + "\n".join(lines)
+    footer = "\n\n## Sources\n" + ("\n".join(lines) if lines else "None cited.")
     note = (
-        "\n\n> ⚠ Verification step failed: claims in this brief were NOT checked against their sources."
-        if not stats.verified
-        else f"\n\n_Verification: {stats.checked} sentences checked, {stats.dropped} dropped as unsupported._"
+        f"\n\n_Grounding: {stats.facts_grounded} facts grounded from {stats.contributing_sources} sources "
+        f"({len(stats.rejected)} rejected). Writing: {stats.writing_breakdown()}._"
     )
     header = f"# Interview brief: {company} — {role} ({LEVEL_LABEL[level]})\n\n"
-    return BriefResult(f"{header}{body.strip()}{footer}{note}\n", stats)
+    return BriefResult(f"{header}{body.strip()}{footer}{note}\n", stats, sources)

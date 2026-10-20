@@ -1,0 +1,416 @@
+from collections import Counter
+from datetime import date
+
+import pytest
+
+import brief
+from brief import RunStats
+from helpers import fact, res
+
+TODAY = date(2026, 10, 19)
+
+SOURCES = {
+    "S1": {**res(1, url="https://stripe.com/about"), "kind": "company", "group": "company", "full_text": "t"},
+    "S2": {**res(2, url="https://www.reddit.com/r/x/2"), "kind": "forum", "group": "interview", "full_text": "t"},
+    "S3": {**res(3, url="https://www.reddit.com/r/x/3"), "kind": "forum", "group": "interview", "full_text": "t"},
+    "S4": {**res(4, url="https://www.reuters.com/x", published="2026-02-24"), "kind": "reputable", "group": "company", "full_text": "t"},
+}
+FACTS = [
+    fact("Stripe builds payments infrastructure.", "Stripe builds payments infrastructure", "company", "S1"),
+    fact("The loop has 4 rounds.", "the loop has 4 rounds", "interview", "S2", is_forum=True),
+    fact("String parsing questions are common.", "string parsing questions come up a lot", "interview", "S3", is_forum=True),
+    fact("Stripe was valued at $159 billion.", "valued at $159 billion", "company", "S4", published="2026-02-24"),
+]
+
+
+def check(body):
+    stats = RunStats()
+    return brief.check_body(body, FACTS, stats), stats
+
+
+# ---- writer prompt ----
+
+def test_writer_prompt_lists_only_grounded_facts_by_section():
+    _, user = brief.build_writer_prompt("Stripe", "SWE", "new-grad", FACTS, SOURCES, TODAY)
+    company_block = user.split("### company facts")[1].split("### interview facts")[0]
+    assert "[F1]" in company_block and "[F4]" in company_block and "published 2026-02-24" in company_block
+    assert "[F2] (source S2, FORUM)" not in user and "[F2] (source S2, stage unknown, FORUM)" in user
+    assert "### role facts\n(none)" in user
+    assert "Inferred, not from a JD" in user  # no posting/JD source with text
+    tldr = user.split("## TL;DR")[1].split("## 1.")[0]
+    assert "ONLY from interview facts" in tldr and "no company news" in tldr
+
+    role_only = [fact("You will build APIs.", "you will build APIs for merchants", "role", "S1")]
+    _, user = brief.build_writer_prompt("Stripe", "SWE", "new-grad", role_only, SOURCES, TODAY)
+    tldr = user.split("## TL;DR")[1].split("## 1.")[0]
+    assert 'First bullet exactly: "No interview reports found."' in tldr and "Never describe interview stages" in tldr
+
+    with_posting = {**SOURCES, "S5": {**res(5), "kind": "company", "group": "posting", "full_text": "jd text"}}
+    _, user = brief.build_writer_prompt("Stripe", "SWE", "new-grad", FACTS, with_posting, TODAY)
+    assert "Inferred" not in user
+
+
+# ---- finalize checks ----
+
+def test_uncited_unknown_and_number_padded_sentences_are_dropped():
+    body = (
+        "## 1. Company overview + recent news\n"
+        "Stripe builds payments infrastructure [F1]. Stripe is the best company. Made up [F99].\n"
+        "Stripe was valued at $159 billion (reported Feb 2026) [F4]. Stripe has 9000 staff [F1].\n"
+    )
+    out, stats = check(body)
+    assert "payments infrastructure [F1]" in out and "$159 billion (reported Feb 2026) [F4]" in out
+    assert "best company" not in out and "Made up" not in out and "9000" not in out
+    assert [(d.code, d.detail) for d in stats.drops] == [("uncited", ""), ("unknown-fact", "F99"), ("number-not-in-facts", "9000")]
+
+
+def test_forum_facts_rewritten_except_in_derived_sections():
+    body = (
+        "## 2. Interview process + common questions\n"
+        "- The loop has 4 rounds [F2].\n"
+        "- Candidates report string parsing is common [F3].\n"
+        "## 4. How to prepare\n"
+        "1. Practice string parsing under time pressure [F3].\n"
+    )
+    out, stats = check(body)
+    assert "- Candidates report that the loop has 4 rounds [F2]." in out
+    assert "- Candidates report string parsing is common [F3]." in out  # already attributed
+    assert "1. Practice string parsing under time pressure [F3]." in out  # advice: not rewritten
+    assert len(stats.rewrites) == 1
+
+
+def test_questions_must_cite_and_lists_are_renumbered_after_drops():
+    body = (
+        "## 4. How to prepare\n"
+        "1. Practice string parsing [F3].\n"
+        "2. Do 6 mock interviews [F2].\n"
+        "3. Rehearse a 4-round day [F2].\n"
+        "## 5. Questions to ask the interviewer\n"
+        "1. What's the culture like?\n"
+        "2. How does the team use payments infrastructure in production [F1]?\n"
+    )
+    out, stats = check(body)
+    assert "1. Practice string parsing [F3]." in out
+    assert "2. Rehearse a 4-round day [F2]." in out  # was 3.
+    assert "culture" not in out
+    assert "1. How does the team use payments infrastructure in production [F1]?" in out  # was 2.
+    assert [d.code for d in stats.drops] == ["number-not-in-facts", "uncited"]
+
+
+HEADINGS = ["## TL;DR", "## 1. Company overview + recent news", "## 2. Interview process + common questions",
+            "## 3. What the role really needs", "## 4. How to prepare", "## 5. Questions to ask the interviewer"]
+
+
+@pytest.mark.parametrize("body", [
+    "",  # writer returned nothing
+    "## TL;DR\n- The loop has 4 rounds [F2].\n## 4. How to prepare\n1. Prepare stories that show you",  # cut off
+    "## 5. Questions to ask\n1. Q [F1]?\n## TL;DR\n- The loop has 4 rounds [F2].",  # wrong order, odd heading text
+    "## TLDR\n- Uncited.\n## 1. Company\nStripe builds payments infrastructure [F1].\n## Extra notes\nignored [F1].",
+])
+def test_all_six_headings_always_render_in_order(body):
+    out, _ = check(body)
+    positions = [out.find(h + "\n") for h in HEADINGS]
+    assert all(p >= 0 for p in positions), out
+    assert positions == sorted(positions)
+    assert out.count("\n## ") + out.startswith("## ") == 6  # nothing else at heading level
+
+
+def test_full_brief_output_has_all_six_headings_even_when_writer_stops_early():
+    stats = RunStats()
+    truncated = "## TL;DR\n- The loop has 4 rounds [F2].\n## 1. Company overview + recent news\nStripe builds"
+    text = brief.finalize_brief("Stripe", "SWE", "new-grad", truncated, FACTS, SOURCES, stats).text
+    for h in HEADINGS[:3] + ["## 3. What the role really needs (Inferred, not from a JD)"] + HEADINGS[4:]:
+        assert h + "\n" in text
+    assert text.count(brief.PLACEHOLDER) == 5  # sections 1-5: the cut-off "Stripe builds" is uncited -> dropped
+
+
+def test_tldr_interview_claims_need_interview_facts():
+    role_fact = fact("Stripe wants people who move with urgency.", "move with urgency", "role", "S1")
+    facts = FACTS + [role_fact]  # F5
+    body = (
+        "## TL;DR\n"
+        "- Interview stages assess your urgency [F5].\n"  # posting marketing dressed up as interview info
+        "- The loop has 4 rounds [F2].\n"
+        "- Stripe wants people who move with urgency [F5].\n"
+    )
+    stats = RunStats()
+    out = brief.check_body(body, facts, stats)
+    assert "assess your urgency" not in out
+    assert "4 rounds" in out and "move with urgency [F5]" in out
+    assert [d.code for d in stats.drops] == ["tldr-interview-without-interview-fact"]
+
+    # no interview facts at all -> say so instead of inferring
+    stats = RunStats()
+    out = brief.check_body(body.replace("- The loop has 4 rounds [F2].\n", ""), [FACTS[0], role_fact], stats)
+    tldr = out.split("## TL;DR\n")[1].split("\n## ")[0]
+    assert tldr.startswith("- No interview reports found.")
+    assert "assess" not in tldr
+
+
+def test_company_section_capped_at_five_sentences():
+    body = "## 1. Company overview + recent news\n" + "\n".join(f"Stripe builds payments infrastructure {n} [F1]." for n in range(7))
+    stats = RunStats()
+    many = [fact("Stripe builds payments infrastructure 0 1 2 3 4 5 6.", "q 0 1 2 3 4 5 6", "company", "S1")]
+    out = brief.check_body(body, many, stats)
+    assert out.count("Stripe builds payments infrastructure") == 5
+    assert [d.code for d in stats.drops] == ["company-section-cap"] * 2
+
+
+def test_select_for_writing_caps_company_facts_per_article_and_total():
+    company = [fact(f"News {n}.", f"news {n} q", "company", f"S{n % 4}") for n in range(16)]
+    interview = [fact("I.", "i q", "interview", "S9")]
+    selected = brief.select_for_writing(company + interview)
+    sel_company = [f for f in selected if f["section"] == "company"]
+    assert len(sel_company) == brief.COMPANY_FACTS_FOR_WRITER
+    assert max(sum(f["source_id"] == sid for f in sel_company) for sid in ("S0", "S1", "S2", "S3")) <= brief.COMPANY_FACTS_PER_SOURCE
+    assert interview[0] in selected
+
+
+# ---- rendering ----
+
+def test_citations_become_one_link_per_source_numbered_by_first_use():
+    two_from_s2 = FACTS + [fact("Rounds are an hour.", "each round is an hour", "interview", "S2", is_forum=True)]
+    body = "Stripe builds payments [F1]. Loop facts [F2][F5][F3]."
+    out, cited = brief.render(body, two_from_s2, SOURCES)
+    assert out == ("Stripe builds payments [1](https://stripe.com/about). Loop facts "
+                   "[2](https://www.reddit.com/r/x/2)[3](https://www.reddit.com/r/x/3).")
+    assert [s["url"] for s in cited] == ["https://stripe.com/about", "https://www.reddit.com/r/x/2", "https://www.reddit.com/r/x/3"]
+
+
+def test_finalize_prunes_sources_and_reports_counts():
+    # 4 facts from 3 distinct sources; only 1 of the 4 sources has full text (the rest are snippets)
+    stats = RunStats(facts_grounded=4, sources_with_text=1, grounded=FACTS[:3] + [FACTS[0]], rejected=[{"reason": "quote-not-found"}])
+    body = "## 1. Company overview + recent news\nStripe builds payments infrastructure [F1]. Uncited.\n"
+    result = brief.finalize_brief("Stripe", "SWE", "new-grad", body, FACTS, SOURCES, stats)
+    sources_part = result.text.split("## Sources")[1]
+    assert "https://stripe.com/about" in sources_part and "reddit" not in sources_part
+    assert "_Grounding: 4 facts grounded from 3 sources (1 rejected). Writing: 2 sentences checked, 1 dropped (1 uncited)._" in result.text
+
+
+def test_debug_report_lists_rejected_facts_drops_and_rewrites():
+    stats = RunStats(steps=["[search] 4 sources"], rejected=[
+        {"fact": "Five rounds.", "exact_quote": "there were five rounds", "section": "interview", "source_id": "S2",
+         "reason": "quote-not-found"},
+    ])
+    brief.check_body("## 2. Interview\n- The loop has 4 rounds [F2]. Uncited claim.\n", FACTS, stats)
+    report = stats.debug_report(SOURCES)
+    assert "- `[search] 4 sources`" in report
+    assert "[pipeline]" not in report and "[finalize]" not in report  # only what the steps logged, once
+    assert "[quote-not-found] exact_quote does not appear in the source text" in report
+    assert 'Quote: "there were five rounds"' in report and "Source: https://www.reddit.com/r/x/2" in report
+    assert "> Uncited claim." in report
+    assert "After: Candidates report that the loop has 4 rounds [F2]." in report
+
+
+# ---- interview stages ----
+
+OA = fact("The online assessment is one coding question.", "the OA is one coding question", "interview", "S2", is_forum=True, stage="oa")
+ONSITE = fact("The onsite has four rounds.", "the onsite has four rounds", "interview", "S3", is_forum=True, stage="onsite")
+GENERAL = fact("Clarify requirements before coding.", "clarify requirements before coding", "interview", "S3", is_forum=True)
+STAGE_FACTS = [OA, ONSITE, GENERAL]  # F1, F2, F3
+
+
+def test_writer_prompt_groups_interview_facts_by_stage_in_order():
+    shuffled = [GENERAL, ONSITE, OA]
+    _, user = brief.build_writer_prompt("Stripe", "SWE", "new-grad", shuffled, SOURCES, TODAY)
+    interview = user.split("### interview facts")[1].split("### role facts")[0]
+    assert interview.index("stage oa") < interview.index("stage onsite") < interview.index("stage unknown")
+    assert '"Online assessment", "Phone screen", "Team screen", "Onsite", "Stage not specified"' in user
+    assert "group by stage" in user and "THAT stage only" in user
+    # one bullet per stage in the TL;DR, no mixing
+    tldr = user.split("## TL;DR")[1].split("## 1.")[0]
+    assert "FORMAT" in tldr and "KEY TOPICS" in tldr and "STANDOUT INSIGHT" in tldr and "never mixes stages" in tldr
+
+
+def test_section2_sentence_mixing_stages_is_split_into_one_sentence_per_fact():
+    body = "## 2. Interview process + common questions\n- The OA has one coding question and the onsite has four rounds [F1][F2].\n"
+    stats = RunStats()
+    out = brief.check_body(body, STAGE_FACTS, stats)
+    assert "The OA has one coding question and the onsite" not in out
+    assert "Candidates report that the online assessment is one coding question [F1]." in out
+    assert "Candidates report that the onsite has four rounds [F2]." in out
+    assert [r.kind for r in stats.rewrites].count("stage-split") == 1
+    assert stats.checked == 1 and not stats.drops
+
+
+def test_unknown_stage_facts_can_share_a_sentence_with_one_stage():
+    body = "## 2. Interview process + common questions\n- Clarify requirements, then code the onsite problem [F2][F3].\n"
+    stats = RunStats()
+    out = brief.check_body(body, STAGE_FACTS, stats)
+    assert "[F2][F3]" in out and not any(r.kind == "stage-split" for r in stats.rewrites)
+
+
+def test_tldr_bullet_mixing_stages_is_trimmed_to_its_first_fact():
+    body = "## TL;DR\n- Expect an OA then a four-round onsite [F1][F2].\n- Clarify requirements before coding [F3].\n"
+    stats = RunStats()
+    out = brief.check_body(body, STAGE_FACTS, stats)
+    tldr = out.split("## TL;DR\n")[1].split("\n\n## 1.")[0]
+    assert "onsite" not in tldr and "online assessment is one coding question" in tldr
+    assert len([l for l in tldr.splitlines() if l.startswith("- ")]) == 2
+    assert [r.kind for r in stats.rewrites if r.kind == "stage-trim"] == ["stage-trim"]
+
+
+def test_bold_stage_labels_are_not_dropped_as_uncited():
+    body = "## 2. Interview process + common questions\n**Online assessment**\n- The OA is one coding question [F1].\n"
+    out = brief.check_body(body, STAGE_FACTS, RunStats())
+    assert "**Online assessment**\n- Candidates report that the OA is one coding question [F1]." in out
+
+
+# ---- hedges ----
+
+def test_hedged_facts_keep_their_hedge_in_the_brief():
+    facts = [
+        fact("Stripe may acquire OpenRouter for over $7 billion.", "may acquire OpenRouter for over $7 billion", "company", "S4", hedged=True),
+        fact("Stripe builds payments infrastructure.", "Stripe builds payments infrastructure", "company", "S1"),
+    ]
+    body = (
+        "## 1. Company overview + recent news\n"
+        "Stripe acquired OpenRouter for over $7 billion (reported Aug 2026) [F1].\n"  # 'reported' label is not a hedge
+        "Stripe may acquire OpenRouter [F1].\n"
+        "Stripe builds payments infrastructure [F2].\n"
+    )
+    stats = RunStats()
+    out = brief.check_body(body, facts, stats)
+    assert "Reportedly, Stripe acquired OpenRouter for over $7 billion (reported Aug 2026) [F1]." in out
+    assert "\nStripe may acquire OpenRouter [F1]." in out  # already hedged: untouched
+    assert "\nStripe builds payments infrastructure [F2]." in out  # unhedged source: untouched
+    assert [r.kind for r in stats.rewrites] == ["hedge-added"]
+
+
+def test_writer_prompt_marks_hedged_facts():
+    facts = [fact("Stripe may acquire OpenRouter.", "may acquire OpenRouter", "company", "S4", hedged=True)]
+    system, user = brief.build_writer_prompt("Stripe", "SWE", "new-grad", facts, SOURCES, TODAY)
+    assert "(source S4, HEDGED)" in user and "Keep the hedge" in system
+
+
+# ---- questions to ask ----
+
+def test_questions_never_about_logistics_rumors_or_interview_facts():
+    facts = [
+        fact("You will build APIs for merchants.", "you will build APIs for merchants", "role", "S1"),
+        fact("Stripe may acquire OpenRouter.", "may acquire OpenRouter", "company", "S4", hedged=True),
+        fact("The onsite has four rounds.", "the onsite has four rounds", "interview", "S3", stage="onsite"),
+    ]  # F1 role, F2 hedged company news, F3 interview
+    body = (
+        "## 5. Questions to ask the interviewer\n"
+        "1. What kinds of merchant APIs would a new grad own in their first year [F1]?\n"
+        "2. How will the OpenRouter acquisition change the team [F2]?\n"
+        "3. How many rounds should I expect in the onsite [F3]?\n"
+        "4. What is the interview timeline from here?\n"
+        "5. How does the team support mentorship and growth [F1]?\n"
+    )
+    stats = RunStats()
+    out = brief.check_body(body, facts, stats)
+    questions = out.split("## 5. Questions to ask the interviewer\n")[1]
+    assert "1. What kinds of merchant APIs" in questions and "2. How does the team support mentorship" in questions
+    assert "OpenRouter" not in questions and "rounds" not in questions and "timeline" not in questions
+    assert [d.code for d in stats.drops] == ["question-logistics-or-rumor"] * 3
+
+
+# ---- citation formats ----
+
+@pytest.mark.parametrize("written, canonical", [
+    ("Fact [F3].", "Fact [F3]."),
+    ("Fact 【F12】.", "Fact [F12]."),  # what the Google eval's writer produced
+    ("Fact 【F10】【F14】【F19】.", "Fact [F10][F14][F19]."),
+    ("Fact [F1, F2].", "Fact [F1][F2]."),
+    ("Fact [F1,F2].", "Fact [F1][F2]."),
+    ("Fact [F1; F3].", "Fact [F1][F3]."),
+    ("Fact [F1 and F3].", "Fact [F1][F3]."),
+    ("Fact [F1 F3].", "Fact [F1][F3]."),
+    ("Fact [F1-F3].", "Fact [F1][F2][F3]."),
+    ("Fact [F1–F3].", "Fact [F1][F2][F3]."),  # en dash
+    ("Fact [F2-4].", "Fact [F2][F3][F4]."),
+    ("Fact [F1, F3-F5].", "Fact [F1][F3][F4][F5]."),
+    ("Fact (F2).", "Fact [F2]."),
+    ("Fact （F2）.", "Fact [F2]."),  # full-width parentheses
+    ("Fact (F1, F2).", "Fact [F1][F2]."),
+    ("Fact [f2].", "Fact [F2]."),
+    ("Fact [ F2 ].", "Fact [F2]."),
+    ("Fact F2.", "Fact [F2]."),  # bare id at the end of the sentence
+    ("Fact F1, F3.", "Fact [F1][F3]."),
+    ("- Fact F2", "- Fact [F2]"),  # bare id at end of line, no period
+    ("Fact [F1][F2].", "Fact [F1][F2]."),  # already canonical: unchanged
+])
+def test_every_citation_variant_is_normalized(written, canonical):
+    assert brief.normalize_citations(written, n_facts=10) == canonical
+
+
+@pytest.mark.parametrize("text", [
+    "A Formula F1 car is fast.",  # bare F1 mid-sentence is not a citation
+    "The F1 visa lets students work.",
+    "Section F2 covers it, and more.",
+    "Fact F99.",  # bare id beyond the number of facts
+    "Call (555) 123-4567.",
+    "See (Appendix F).",
+])
+def test_ordinary_text_is_left_alone(text):
+    assert brief.normalize_citations(text, n_facts=10) == text
+
+
+def test_out_of_range_bracketed_ids_stay_citations_so_they_are_reported_as_unknown():
+    assert brief.normalize_citations("Fact 【F99】.", n_facts=10) == "Fact [F99]."
+    stats = RunStats()
+    out = brief.check_body("## 1. Company overview + recent news\nMade up 【F99】.\n", FACTS, stats)
+    assert [(d.code, d.detail) for d in stats.drops] == [("unknown-fact", "F99")]
+
+
+def test_the_google_eval_draft_style_is_no_longer_dropped_as_uncited():
+    body = (
+        "## 2. Interview process + common questions\n"
+        "- Online assessments are included in the process【F1】.\n"
+        "- Phone interviews are technical (feedback goes to the hiring committee)【F2】【F3】.\n"
+        "## 5. Questions to ask the interviewer\n"
+        "1. What mentorship is available for interns working with Google's full-stack AI tools?【F5】\n"
+    )
+    facts = [
+        fact("Online assessments are included in the interview process.", "online assessments", "interview", "S2", stage="oa"),
+        fact("Technical phone interviews feed the hiring committee.", "phone interviews", "interview", "S3", stage="phone-screen"),
+        fact("Phone interview is a common stage.", "phone interview is common", "interview", "S3", stage="phone-screen"),
+        fact("x", "x y z", "company", "S1"),
+        fact("Google uses full-stack AI tools.", "full-stack AI", "company", "S1"),
+    ]
+    stats = RunStats()
+    out = brief.check_body(body, facts, stats)
+    assert not [d for d in stats.drops if d.code == "uncited"]
+    assert "[F1]" in out and "[F2][F3]" in out and "[F5]" in out
+    text, cited = brief.render(out, facts, SOURCES)
+    assert "【" not in text and "](https://www.reddit.com/r/x/2)" in text
+
+
+# ---- capping facts for the writer ----
+
+def _many(section, n_sources, per_source, start_sid=1, **kw):
+    return [fact(f"{section} fact {s}-{i}.", f"{section} quote {s} {i}", section, f"S{start_sid + s}", **kw)
+            for s in range(n_sources) for i in range(per_source)]
+
+
+def test_writer_gets_at_most_30_facts_posting_and_interview_first_company_reserved():
+    company = _many("company", 4, 8, start_sid=1)  # 32 company facts
+    interview = _many("interview", 6, 6, start_sid=10)  # 36
+    role = _many("role", 2, 11, start_sid=20)  # 22
+    facts = company + interview + role
+    chosen = brief.select_for_writing(facts)
+    by_section = Counter(f["section"] for f in chosen)
+    assert len(chosen) == brief.MAX_WRITER_FACTS == 30
+    assert by_section["company"] == brief.COMPANY_RESERVE == 5
+    assert by_section["interview"] + by_section["role"] == 25 and by_section["interview"] > by_section["role"]
+    assert chosen == [f for f in facts if f in chosen]  # original order kept, so fact ids are stable
+    # interleaved across sources: every interview source contributes before any contributes a 3rd fact
+    per_source = Counter(f["source_id"] for f in chosen if f["section"] == "interview")
+    assert len(per_source) == 6 and max(per_source.values()) - min(per_source.values()) <= 1
+
+
+def test_small_fact_sets_are_not_trimmed_but_company_stays_capped():
+    facts = _many("company", 4, 8) + _many("interview", 1, 2, start_sid=10) + _many("role", 1, 3, start_sid=20)
+    chosen = brief.select_for_writing(facts)
+    by_section = Counter(f["section"] for f in chosen)
+    assert by_section["interview"] == 2 and by_section["role"] == 3  # everything kept
+    assert by_section["company"] == brief.COMPANY_FACTS_FOR_WRITER  # 4 sources x 3 per source = 12, capped to 10
+    assert max(Counter(f["source_id"] for f in chosen if f["section"] == "company").values()) <= brief.COMPANY_FACTS_PER_SOURCE
+
+
+def test_unused_role_budget_flows_to_interview():
+    facts = _many("interview", 5, 8, start_sid=10) + _many("company", 2, 3)
+    chosen = brief.select_for_writing(facts)
+    assert Counter(f["section"] for f in chosen) == {"interview": 25, "company": 5}

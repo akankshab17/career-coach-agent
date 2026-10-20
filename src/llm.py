@@ -18,6 +18,7 @@ PRICES = {
     ("openai", "gpt-4o-mini"): (0.15, 0.60),
 }
 
+MAX_OUTPUT_TOKENS = 16384  # reasoning models (gpt-oss) spend part of this on hidden reasoning
 RETRIES = 2  # retries after the first attempt -> 3 attempts total
 BACKOFF_SECONDS = 2  # waits 2s, then 4s
 _sleep = time.sleep  # replaced in tests
@@ -55,14 +56,27 @@ def _require_key(name: str) -> str:
     return key
 
 
+_truncated = 0  # how many responses so far were cut off by the output-token limit
+
+
+def truncation_count() -> int:
+    return _truncated
+
+
 def _chat(client, model: str, system_prompt: str, user_prompt: str) -> tuple[str, int, int]:
     # Groq and OpenAI share the same chat-completions shape.
     resp = client.chat.completions.create(
         model=model,
         temperature=0.2,
+        max_completion_tokens=MAX_OUTPUT_TOKENS,
         messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
     )
-    return resp.choices[0].message.content, resp.usage.prompt_tokens, resp.usage.completion_tokens
+    choice = resp.choices[0]
+    if choice.finish_reason == "length":
+        global _truncated
+        _truncated += 1
+        print(f"[llm] WARNING: output hit the {MAX_OUTPUT_TOKENS}-token limit and was cut off", file=sys.stderr)
+    return choice.message.content or "", resp.usage.prompt_tokens, resp.usage.completion_tokens
 
 
 def _call_groq(model, system_prompt, user_prompt):
