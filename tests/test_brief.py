@@ -17,8 +17,8 @@ SOURCES = {
 }
 FACTS = [
     fact("Stripe builds payments infrastructure.", "Stripe builds payments infrastructure", "company", "S1"),
-    fact("The loop has 4 rounds.", "the loop has 4 rounds", "interview", "S2", is_forum=True),
-    fact("String parsing questions are common.", "string parsing questions come up a lot", "interview", "S3", is_forum=True),
+    fact("The loop has 4 rounds.", "the loop has 4 rounds", "interview", "S2", is_experience=True),
+    fact("String parsing questions are common.", "string parsing questions come up a lot", "interview", "S3", is_experience=True),
     fact("Stripe was valued at $159 billion.", "valued at $159 billion", "company", "S4", published="2026-02-24"),
 ]
 
@@ -34,16 +34,21 @@ def test_writer_prompt_lists_only_grounded_facts_by_section():
     _, user = brief.build_writer_prompt("Stripe", "SWE", "new-grad", FACTS, SOURCES, TODAY)
     company_block = user.split("### company facts")[1].split("### interview facts")[0]
     assert "[F1]" in company_block and "[F4]" in company_block and "published 2026-02-24" in company_block
-    assert "[F2] (source S2, FORUM)" not in user and "[F2] (source S2, stage unknown, FORUM)" in user
+    assert "[F2] (source S2, CANDIDATE-REPORT)" not in user and "[F2] (source S2, stage unknown, CANDIDATE-REPORT)" in user
     assert "### role facts\n(none)" in user
     assert "Inferred, not from a JD" in user  # no posting/JD source with text
+    tldr = user.split("## TL;DR")[1].split("## 1.")[0]
+    assert "only 2 interview fact(s)" in tldr and "do NOT write one" in tldr  # FACTS has just 2 interview facts
+
+    three = FACTS + [fact("A third interview fact.", "a third interview fact", "interview", "S3")]
+    _, user = brief.build_writer_prompt("Stripe", "SWE", "new-grad", three, SOURCES, TODAY)
     tldr = user.split("## TL;DR")[1].split("## 1.")[0]
     assert "ONLY from interview facts" in tldr and "no company news" in tldr
 
     role_only = [fact("You will build APIs.", "you will build APIs for merchants", "role", "S1")]
     _, user = brief.build_writer_prompt("Stripe", "SWE", "new-grad", role_only, SOURCES, TODAY)
     tldr = user.split("## TL;DR")[1].split("## 1.")[0]
-    assert 'First bullet exactly: "No interview reports found."' in tldr and "Never describe interview stages" in tldr
+    assert "NO interview facts" in tldr and "Never describe interview stages" in tldr
 
     with_posting = {**SOURCES, "S5": {**res(5), "kind": "company", "group": "posting", "full_text": "jd text"}}
     _, user = brief.build_writer_prompt("Stripe", "SWE", "new-grad", FACTS, with_posting, TODAY)
@@ -89,11 +94,13 @@ def test_questions_must_cite_and_lists_are_renumbered_after_drops():
         "1. What's the culture like?\n"
         "2. How does the team use payments infrastructure in production [F1]?\n"
     )
-    out, stats = check(body)
+    role = fact("Interns own small features.", "interns own small features", "role", "S1")
+    stats = RunStats()
+    out = brief.check_body(body.replace("[F1]?", "[F5]?"), FACTS + [role], stats)
     assert "1. Practice string parsing [F3]." in out
     assert "2. Rehearse a 4-round day [F2]." in out  # was 3.
     assert "culture" not in out
-    assert "1. How does the team use payments infrastructure in production [F1]?" in out  # was 2.
+    assert "1. How does the team use payments infrastructure in production [F5]?" in out  # was 2.
     assert [d.code for d in stats.drops] == ["number-not-in-facts", "uncited"]
 
 
@@ -142,8 +149,8 @@ def test_tldr_interview_claims_need_interview_facts():
     # no interview facts at all -> say so instead of inferring
     stats = RunStats()
     out = brief.check_body(body.replace("- The loop has 4 rounds [F2].\n", ""), [FACTS[0], role_fact], stats)
-    tldr = out.split("## TL;DR\n")[1].split("\n## ")[0]
-    assert tldr.startswith("- No interview reports found.")
+    tldr = out.split("## TL;DR\n")[1].split("\n\n## ")[0]
+    assert tldr.startswith("- Limited interview data (0 sources).\n- No interview reports found.")
     assert "assess" not in tldr
 
 
@@ -169,7 +176,7 @@ def test_select_for_writing_caps_company_facts_per_article_and_total():
 # ---- rendering ----
 
 def test_citations_become_one_link_per_source_numbered_by_first_use():
-    two_from_s2 = FACTS + [fact("Rounds are an hour.", "each round is an hour", "interview", "S2", is_forum=True)]
+    two_from_s2 = FACTS + [fact("Rounds are an hour.", "each round is an hour", "interview", "S2", is_experience=True)]
     body = "Stripe builds payments [F1]. Loop facts [F2][F5][F3]."
     out, cited = brief.render(body, two_from_s2, SOURCES)
     assert out == ("Stripe builds payments [1](https://stripe.com/about). Loop facts "
@@ -204,9 +211,9 @@ def test_debug_report_lists_rejected_facts_drops_and_rewrites():
 
 # ---- interview stages ----
 
-OA = fact("The online assessment is one coding question.", "the OA is one coding question", "interview", "S2", is_forum=True, stage="oa")
-ONSITE = fact("The onsite has four rounds.", "the onsite has four rounds", "interview", "S3", is_forum=True, stage="onsite")
-GENERAL = fact("Clarify requirements before coding.", "clarify requirements before coding", "interview", "S3", is_forum=True)
+OA = fact("The online assessment is one coding question.", "the OA is one coding question", "interview", "S2", is_experience=True, stage="oa")
+ONSITE = fact("The onsite has four rounds.", "the onsite has four rounds", "interview", "S3", is_experience=True, stage="onsite")
+GENERAL = fact("Clarify requirements before coding.", "clarify requirements before coding", "interview", "S3", is_experience=True)
 STAGE_FACTS = [OA, ONSITE, GENERAL]  # F1, F2, F3
 
 
@@ -368,7 +375,7 @@ def test_the_google_eval_draft_style_is_no_longer_dropped_as_uncited():
         fact("Technical phone interviews feed the hiring committee.", "phone interviews", "interview", "S3", stage="phone-screen"),
         fact("Phone interview is a common stage.", "phone interview is common", "interview", "S3", stage="phone-screen"),
         fact("x", "x y z", "company", "S1"),
-        fact("Google uses full-stack AI tools.", "full-stack AI", "company", "S1"),
+        fact("Interns work with Google's full-stack AI tools.", "full-stack AI", "role", "S1"),
     ]
     stats = RunStats()
     out = brief.check_body(body, facts, stats)
@@ -414,3 +421,168 @@ def test_unused_role_budget_flows_to_interview():
     facts = _many("interview", 5, 8, start_sid=10) + _many("company", 2, 3)
     chosen = brief.select_for_writing(facts)
     assert Counter(f["section"] for f in chosen) == {"interview": 25, "company": 5}
+
+
+# ---- sentence splitting ----
+
+@pytest.mark.parametrize("text, expected", [
+    ("Candidates need a B.Tech or M.S. in CS from a U.S. university, e.g. IIT [F1]. Next sentence [F2].",
+     ["Candidates need a B.Tech or M.S. in CS from a U.S. university, e.g. IIT [F1].", "Next sentence [F2]."]),
+    ("Cummins Inc. is based in Indiana [F1]. It makes engines [F2].",
+     ["Cummins Inc. is based in Indiana [F1].", "It makes engines [F2]."]),
+    ("Open to Ph.D. students. Apply by May 1 [F1].", ["Open to Ph.D. students.", "Apply by May 1 [F1]."]),
+    ("Dr. Smith leads the team [F1]. Expect a call.", ["Dr. Smith leads the team [F1].", "Expect a call."]),
+    ("Use Python, Java, etc. in the loop [F1]. Then wait.", ["Use Python, Java, etc. in the loop [F1].", "Then wait."]),
+    ("A $1.5 billion deal closed in v2.0 of the plan [F1]!", ["A $1.5 billion deal closed in v2.0 of the plan [F1]!"]),
+    ("First one. Second one? Third one!", ["First one.", "Second one?", "Third one!"]),
+    ("Interview with J. Smith went well [F3]. Offer came later [F4].", ["Interview with J. Smith went well [F3].", "Offer came later [F4]."]),
+    ("No terminal punctuation [F1]", ["No terminal punctuation [F1]"]),
+    ("Done. [F1] Then more [F2].", ["Done. [F1]", "Then more [F2]."]),  # a citation after the period closes the sentence
+])
+def test_sentences_are_not_split_inside_abbreviations(text, expected):
+    assert brief.split_sentences(text) == expected
+
+
+def test_abbreviations_in_a_real_sentence_stay_one_cited_sentence():
+    facts = [fact("Candidates need a B.Tech or M.S. degree.", "a B.Tech or M.S. in CS", "role", "S1")]
+    body = "## 3. What the role really needs\nCandidates need a B.Tech or M.S. in CS, e.g. from a U.S. school [F1].\n"
+    stats = RunStats()
+    out = brief.check_body(body, facts, stats)
+    assert stats.checked == 1 and not stats.drops
+    assert "B.Tech or M.S. in CS, e.g. from a U.S. school [F1]." in out
+
+
+# ---- who is reporting ----
+
+def test_candidates_report_only_for_first_person_interview_facts_not_job_reposts():
+    facts = [
+        fact("The loop has four rounds.", "the loop has four rounds", "interview", "S2", is_experience=True),
+        fact("You will build APIs for merchants.", "build APIs for merchants", "role", "S2", is_experience=False),  # a repost on Reddit
+    ]
+    body = ("## 2. Interview process + common questions\n- The loop has four rounds [F1].\n"
+            "## 3. What the role really needs\n- You will build APIs for merchants [F2].\n")
+    out = brief.check_body(body, facts, RunStats())
+    assert "Candidates report that the loop has four rounds [F1]." in out
+    assert "\n- You will build APIs for merchants [F2]." in out  # not rewritten
+
+
+def test_writer_prompt_tags_only_experience_facts_as_candidate_reports():
+    facts = [fact("The loop has four rounds.", "q 1", "interview", "S2", is_experience=True),
+             fact("You will build APIs.", "q 2", "role", "S2")]
+    system, user = brief.build_writer_prompt("Stripe", "SWE", "new-grad", facts, SOURCES, TODAY)
+    assert "[F1] (source S2, stage unknown, CANDIDATE-REPORT)" in user and "[F2] (source S2)" in user
+    assert "first-person interview experiences" in system
+
+
+# ---- interview-fact level ----
+
+def mixed_levels():
+    return [
+        fact("New-grad loop has 4 rounds.", "q a", "interview", "S2", level="new-grad", stage="onsite"),
+        fact("Full-time loop has 6 rounds.", "q b", "interview", "S3", level="experienced", stage="onsite"),
+        fact("Tip: clarify requirements.", "q c", "interview", "S3", level="unknown"),
+        fact("Intern loop has 2 rounds.", "q d", "interview", "S2", level="intern", stage="onsite"),
+    ]
+
+
+def test_mismatched_levels_are_labelled_matching_and_unknown_are_not():
+    body = ("## 2. Interview process + common questions\n"
+            "- The loop has 4 rounds [F1].\n- The loop has 6 rounds [F2].\n- Clarify requirements [F3].\n"
+            "- The loop has 2 rounds. [F4]\n")
+    stats = RunStats()
+    out = brief.check_body(body, mixed_levels(), stats, level="new-grad")
+    assert "- The loop has 4 rounds [F1]." in out and "Clarify requirements [F3]." in out and "(new-grad process)" not in out
+    assert "- The loop has 6 rounds (full-time process) [F2]." in out
+    assert "- The loop has 2 rounds (internship process). [F4]" in out  # label goes before the period/citations
+    assert [r.kind for r in stats.rewrites] == ["level-label", "level-label"]
+
+
+def test_a_label_the_writer_already_wrote_is_not_doubled_and_no_level_means_no_labels():
+    body = "## 2. Interview process + common questions\n- The loop has 6 rounds (full-time process) [F2].\n"
+    out = brief.check_body(body, mixed_levels(), RunStats(), level="new-grad")
+    assert out.count("process)") == 1
+    out = brief.check_body("## 2. Interview process + common questions\n- The loop has 6 rounds [F2].\n", mixed_levels(), RunStats())
+    assert "process)" not in out
+
+
+def test_sentence_mixing_two_other_levels_gets_a_generic_label():
+    body = "## 2. Interview process + common questions\n- Loops run 2 to 6 rounds [F2][F4].\n"
+    out = brief.check_body(body, mixed_levels(), RunStats(), level="new-grad")
+    assert "(other-level processes)" in out
+
+
+def test_writer_prompt_marks_level_mismatches_with_their_label():
+    _, user = brief.build_writer_prompt("Cummins", "SWE", "new-grad", mixed_levels(), SOURCES, TODAY)
+    assert 'level experienced, LEVEL-MISMATCH, label "(full-time process)"' in user
+    assert 'level intern, LEVEL-MISMATCH, label "(internship process)"' in user
+    assert "[F1] (source S2, stage onsite, level new-grad)" in user  # the matching one carries its level but no mismatch flag
+    assert "[F3] (source S3, stage unknown)" in user  # unknown level: no tag
+
+
+def test_level_matching_interview_facts_are_preferred_for_the_writer():
+    matching = [fact(f"match {i}.", f"mq {i}", "interview", f"S{10 + i % 3}", level="new-grad") for i in range(12)]
+    unknown = [fact(f"unknown {i}.", f"uq {i}", "interview", "S20", level="unknown") for i in range(4)]
+    other = [fact(f"other {i}.", f"oq {i}", "interview", "S30", level="experienced") for i in range(20)]
+    chosen = brief.select_for_writing(other + matching + unknown, limit=20, level="new-grad")
+    interview = [f for f in chosen if f["section"] == "interview"]
+    assert all(f in interview for f in matching + unknown)  # every fitting fact is in...
+    assert sum(f["level"] == "experienced" for f in interview) == len(interview) - 16  # ...before any other-level fact fills in
+    only_other = brief.select_for_writing(other[:5], limit=20, level="new-grad")
+    assert len(only_other) == 5  # other-level facts are still used when nothing better exists (and then labelled)
+
+
+# ---- limited interview data ----
+
+def tl_dr(out):
+    return out.split("## TL;DR\n")[1].split("\n\n## ")[0]
+
+
+def test_tldr_warns_when_there_are_fewer_than_three_interview_facts():
+    two = [fact("The loop has 4 rounds.", "q a", "interview", "S2"), fact("Clarify requirements.", "q b", "interview", "S3")]
+    body = "## TL;DR\n- The loop has 4 rounds [F1].\n- Limited interview data (9 sources).\n"  # the writer's own line is replaced
+    out = brief.check_body(body, two, RunStats())
+    assert tl_dr(out) == "- Limited interview data (2 sources).\n- The loop has 4 rounds [F1]."
+    assert tl_dr(out).count("Limited interview data") == 1
+
+    one_source = [fact("A.", "q a", "interview", "S2"), fact("B.", "q b", "interview", "S2")]
+    assert tl_dr(brief.check_body("## TL;DR\n- A [F1].\n", one_source, RunStats())).startswith("- Limited interview data (1 source).")
+
+    none = tl_dr(brief.check_body("## TL;DR\n- No interview reports found.\n", [], RunStats()))
+    assert none == "- Limited interview data (0 sources).\n- No interview reports found."
+
+    three = [fact(f"Fact {i}.", f"q {i}", "interview", "S2") for i in range(3)]
+    assert "Limited interview data" not in brief.check_body("## TL;DR\n- Fact 0 [F1].\n", three, RunStats())
+
+
+# ---- "How to prepare" / "Questions" cite role or interview facts only ----
+
+def test_prep_and_questions_cannot_cite_company_news():
+    facts = [
+        fact("Stripe acquired Bridge.", "acquired Bridge", "company", "S1", published="2026-02-24"),
+        fact("You will build APIs for merchants.", "build APIs for merchants", "role", "S1"),
+        fact("Clarify requirements before coding.", "clarify requirements", "interview", "S3"),
+    ]
+    body = (
+        "## 4. How to prepare\n"
+        "1. Read up on the Bridge acquisition [F1].\n"
+        "2. Practice API design [F2].\n"
+        "3. Practice clarifying requirements [F3].\n"
+        "4. Connect APIs to the Bridge deal [F1][F2].\n"
+        "## 5. Questions to ask the interviewer\n"
+        "1. How did the Bridge acquisition change the roadmap [F1]?\n"
+        "2. Which merchant APIs would I own [F2]?\n"
+        "3. How does the team coach new engineers on clarifying requirements [F3]?\n"
+    )
+    stats = RunStats()
+    out = brief.check_body(body, facts, stats)
+    assert "Bridge" not in out.split("## 4.")[1]
+    assert "1. Practice API design [F2]." in out and "2. Practice clarifying requirements [F3]." in out  # renumbered
+    assert "1. Which merchant APIs would I own [F2]?" in out and "2. How does the team coach" in out  # interview facts are fine
+    assert [d.code for d in stats.drops] == ["derived-cites-company-news"] * 3
+    assert "derived-cites-company-news" in brief.DROP_REASONS
+
+
+def test_writer_prompt_restricts_prep_and_questions_to_role_and_interview_facts():
+    system, user = brief.build_writer_prompt("Stripe", "SWE", "new-grad", FACTS, SOURCES, TODAY)
+    assert "must be ROLE or INTERVIEW facts. Never base them on company news" in system
+    assert "each citing a ROLE or INTERVIEW fact; no company news" in user

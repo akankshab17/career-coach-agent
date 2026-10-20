@@ -22,13 +22,15 @@ def fake_extract(urls, client=None):
     return {u: TEXTS[u] for u in urls if u in TEXTS}
 
 
-def fake_llm(extracted_facts, writer_output, calls=None):
+def fake_llm(extracted_facts, writer_output, calls=None, tasks=None):
     """Stand-in for llm.generate.
 
     Extraction calls return extracted_facts[url] (a list of fact dicts); the writer returns writer_output.
-    `calls` (a list) records ("extract", url) / ("write", None) in order.
+    `tasks` (a list) records the task= argument of every call. `calls` (a list) records ("extract", url) / ("write", None) in order.
     """
-    def generate(system_prompt, user_prompt):
+    def generate(system_prompt, user_prompt, task="write"):
+        if tasks is not None:
+            tasks.append(task)
         if "extract facts" in system_prompt:
             url = re.search(r"^URL: (.*)$", user_prompt, re.M).group(1)
             if calls is not None:
@@ -40,8 +42,10 @@ def fake_llm(extracted_facts, writer_output, calls=None):
     return generate
 
 
-def fact(fact_text, quote, section, source_id="S1", is_forum=False, published=None, stage=None, hedged=False):
+def fact(fact_text, quote, section, source_id="S1", is_experience=False, published=None, stage=None, hedged=False, level=None,
+         pinned=False):
     """A grounded fact, as ground() produces it. Interview facts default to stage 'unknown'."""
-    return {"fact": fact_text, "exact_quote": quote, "section": section, "is_forum": is_forum,
+    return {"fact": fact_text, "exact_quote": quote, "section": section, "is_experience": is_experience,
             "source_id": source_id, "published_date": published, "grounded_in": "full",
-            "stage": (stage or "unknown") if section == "interview" else "", "hedged": hedged}
+            "stage": (stage or "unknown") if section == "interview" else "",
+            "level": (level or "unknown") if section == "interview" else "", "hedged": hedged, "pinned": pinned}

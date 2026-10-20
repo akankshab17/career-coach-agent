@@ -11,6 +11,8 @@ from urllib.parse import urlparse
 
 from tavily import TavilyClient
 
+from location import DEFAULT_LOCATION, MATCH, OTHER, RANK, classify_location, find_location
+
 MAX_RESULTS = 5
 POSTING_RESULTS = 10  # fetch more postings so there's a good chance one matches the level
 RECENT_DAYS = 365
@@ -37,6 +39,7 @@ REPUTABLE_DOMAINS = (
     "businessinsider.com", "axios.com", "economist.com", "theinformation.com",
 )
 FORUM_DOMAINS = ("reddit.com", "teamblind.com", "quora.com", "news.ycombinator.com")
+BLOG_DOMAINS = ("medium.com", "substack.com", "dev.to", "hashnode.dev", "blogspot.com", "wordpress.com", "ghost.io")
 
 
 def _host(url: str) -> str:
@@ -54,12 +57,14 @@ def _slug(company: str) -> str:
 
 
 def source_kind(url: str, company: str) -> str:
-    """company | reputable | forum | other -- used to rank sources and phrase claims."""
+    """company | reputable | forum | blog | other -- used to rank sources and decide who is "reporting"."""
     host = _host(url)
     if "leetcode.com" in host and "/discuss" in url:
         return "forum"
     if any(host == d or host.endswith("." + d) for d in FORUM_DOMAINS):
         return "forum"
+    if any(host == d or host.endswith("." + d) for d in BLOG_DOMAINS):
+        return "blog"
     if _slug(company) and _slug(company) in host.replace(".", "").replace("-", ""):
         return "company"
     if any(host == d or host.endswith("." + d) for d in REPUTABLE_DOMAINS):
@@ -209,7 +214,7 @@ def fetch_full_text(sources: dict[str, dict]) -> tuple[int, int]:
     wanted = [
         sid for sid, s in sources.items()
         if "full_text" not in s and not s.get("fetch_attempted")
-        and (s.get("group") != "company" or sid in company_ids or s.get("kind") == "forum")
+        and (s.get("group") != "company" or sid in company_ids or s.get("kind") in ("forum", "blog"))
     ]
     texts = extract([sources[sid]["url"] for sid in wanted])
     for sid in wanted:
@@ -236,7 +241,7 @@ def drop_stale(results: list[dict], today: date, days: int = RECENT_DAYS) -> lis
     return [r for r in results if not r["published_date"] or r["published_date"] >= cutoff]
 
 
-_TIER = {"company": 0, "reputable": 1, "other": 2, "forum": 3}
+_TIER = {"company": 0, "reputable": 1, "other": 2, "blog": 2, "forum": 3}
 
 
 def rank(results: list[dict], company: str) -> list[dict]:
@@ -255,9 +260,17 @@ def classify_level(result: dict) -> str:
     return "experienced"
 
 
-def rank_postings(results: list[dict], company: str, role: str, level: str) -> list[dict]:
-    """Keep only postings at the requested level, best match first."""
-    candidates = [r for r in results if classify_level(r) == level]
+def posting_location_class(result: dict, location: str | None) -> str:
+    """match / other / unknown from the title, URL and snippet (full text is re-checked once fetched)."""
+    return classify_location(f"{result['title']} {result['url']} {result['content'][:800]}", location)
+
+
+def rank_postings(results: list[dict], company: str, role: str, level: str, location: str | None = None) -> list[dict]:
+    """Keep only postings at the requested level, best first. With a location: postings in it come first,
+    unknown ones next, and postings from another country are dropped whenever one in the location exists."""
+    candidates = [{**r, "location_class": posting_location_class(r, location)} for r in results if classify_level(r) == level]
+    if location and any(c["location_class"] == MATCH for c in candidates):
+        candidates = [c for c in candidates if c["location_class"] != OTHER]
     role_words = [w for w in re.findall(r"[a-z]+", role.lower()) if len(w) > 2]
 
     def score(r: dict) -> int:
@@ -267,12 +280,13 @@ def rank_postings(results: list[dict], company: str, role: str, level: str) -> l
         s += 1 if re.search(r"career|job", r["url"].lower()) else 0
         return s
 
-    return sorted(candidates, key=score, reverse=True)  # stable: ties keep search relevance order
+    by_score = sorted(candidates, key=score, reverse=True)  # stable: ties keep search relevance order
+    return sorted(by_score, key=lambda r: RANK[r["location_class"]]) if location else by_score
 
 
-def pick_posting(results: list[dict], company: str, role: str, level: str) -> list[dict]:
+def pick_posting(results: list[dict], company: str, role: str, level: str, location: str | None = None) -> list[dict]:
     """The single best posting at the requested level (or [])."""
-    return rank_postings(results, company, role, level)[:1]
+    return rank_postings(results, company, role, level, location)[:1]
 
 
 def normalize_posting_url(url: str) -> str:
@@ -282,22 +296,42 @@ def normalize_posting_url(url: str) -> str:
     return url
 
 
-def resolve_posting(candidates: list[dict]) -> list[dict]:
-    """Return one posting with full text. Try the best candidates in order; fall back to the best snippet."""
-    for cand in candidates[:MAX_POSTING_TRIES]:
+def resolve_posting(candidates: list[dict], location: str | None = None) -> list[dict]:
+    """Return one posting with full text. Try the best candidates in order; fall back to the best snippet.
+
+    With a location, a fetched page that really is in it wins immediately; otherwise the next candidate is
+    tried, and a page in another country is used only if nothing better was found.
+    """
+    found: list[tuple[int, int, dict]] = []  # (location rank, order, posting)
+    for order, cand in enumerate(candidates[:MAX_POSTING_TRIES]):
         url = normalize_posting_url(cand["url"])
         text = extract([url]).get(url, "")
-        if len(text.strip()) >= MIN_POSTING_CHARS:
-            return [{**cand, "url": url, "full_text": text}]
-        print(f"[search] posting text from {url} missing or under {MIN_POSTING_CHARS} chars; trying next result", file=sys.stderr)
+        if len(text.strip()) < MIN_POSTING_CHARS:
+            print(f"[search] posting text from {url} missing or under {MIN_POSTING_CHARS} chars; trying next result", file=sys.stderr)
+            continue
+        cls = classify_location(text, location) if location else MATCH
+        posting = {**cand, "url": url, "full_text": text, "location_class": cls}
+        if cls == MATCH:
+            return [posting]
+        print(f"[search] posting {url} is not clearly in {location} (looks {cls}); looking for a better one", file=sys.stderr)
+        found.append((RANK[cls], order, posting))
+    if found:
+        return [min(found, key=lambda t: t[:2])[2]]
     if candidates:
         print(f"[search] no posting page could be extracted; using the snippet of {candidates[0]['url']}", file=sys.stderr)
         return candidates[:1]
     return []
 
 
-def gather_research(company: str, role: str, level: str, jd: str | None, today: date | None = None) -> dict[str, list[dict]]:
-    """Run every query the brief needs, grouped by topic."""
+def posting_location(posting: dict, location: str | None) -> dict | None:
+    """{place, quote, class} for where a fetched posting says the job is, or None."""
+    text = posting.get("full_text")
+    return find_location(text, location) if text else None
+
+
+def gather_research(company: str, role: str, level: str, jd: str | None, today: date | None = None,
+                    location: str = DEFAULT_LOCATION) -> dict[str, list[dict]]:
+    """Run every query the brief needs, grouped by topic. The posting is chosen to be in `location`."""
     today = today or date.today()
     terms = LEVEL_QUERY_TERMS[level]
 
@@ -320,13 +354,13 @@ def gather_research(company: str, role: str, level: str, jd: str | None, today: 
         "filtered": interview_filtered,  # not a source group: reported in the run log and debug file
     }
     if not jd:
-        postings = search(f"{company} {role} {terms} job posting", max_results=POSTING_RESULTS)
-        research["posting"] = resolve_posting(rank_postings(postings, company, role, level))
+        postings = search(f"{company} {role} {terms} job posting {location}", max_results=POSTING_RESULTS)
+        research["posting"] = resolve_posting(rank_postings(postings, company, role, level, location), location)
     return research
 
 
 def search_more(company: str, role: str, level: str, section: str, known_urls: set[str],
-                filtered_out: list[dict] | None = None) -> list[dict]:
+                filtered_out: list[dict] | None = None, location: str = DEFAULT_LOCATION) -> list[dict]:
     """Targeted second-round search for a section that came up short. Returns only unseen results.
 
     Interview results that are irrelevant are appended to `filtered_out` (if given) instead of returned.
@@ -342,8 +376,8 @@ def search_more(company: str, role: str, level: str, section: str, known_urls: s
         if filtered_out is not None:
             filtered_out += [f for f in filtered if f["url"] not in known_urls]
     elif section == "role":
-        postings = search(f"{company} careers {role} {terms} responsibilities qualifications", max_results=POSTING_RESULTS)
-        results = [{**r, "url": normalize_posting_url(r["url"])} for r in rank_postings(postings, company, role, level)][:2]
+        postings = search(f"{company} careers {role} {terms} responsibilities qualifications {location}", max_results=POSTING_RESULTS)
+        results = [{**r, "url": normalize_posting_url(r["url"])} for r in rank_postings(postings, company, role, level, location)][:2]
     else:
         raise ValueError(f"no follow-up search for section {section!r}")
     return [r for r in _dedupe(results) if r["url"] not in known_urls]

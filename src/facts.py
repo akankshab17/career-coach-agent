@@ -9,20 +9,26 @@ import json
 import os
 import re
 import unicodedata
+from urllib.parse import urlparse
 
 import llm
 
-PROMPT_VERSION = "extract-v2"  # bump when EXTRACT_SYSTEM_PROMPT changes, so old cache entries are ignored
+PROMPT_VERSION = "extract-v3"  # bump when EXTRACT_SYSTEM_PROMPT changes, so old cache entries are ignored
 CACHE_DIR = os.path.join(".cache", "extract")
 SECTIONS = ("company", "interview", "role")
 STAGES = ("oa", "phone-screen", "team-screen", "onsite", "unknown")
+LEVELS = ("intern", "new-grad", "experienced", "unknown")
+EXPERIENCE_KINDS = ("forum", "blog")  # first-person accounts live here: Reddit, LeetCode discuss, Medium and other blogs
 MAX_FACTS_PER_SOURCE = 12
 MIN_QUOTE_WORDS = 3
 
 # Facts that go stale fast. Facts like these need a dated source.
+_BIG = r"(?:\d{1,3}(?:,\d{3})+|\d{3,})(?:\.\d+)?"  # 250, 8,000, 67,400 (so "3 people on the panel" is not a headcount)
 TIME_SENSITIVE_RE = re.compile(
-    r"valuation|valued at|\bworth\b|headcount|employees|employs|workforce|staff of|"
-    r"funding|raised|\bseries [a-h]\b|tender offer|revenue|\bipo\b|layoffs?|laid off",
+    r"valuation|valued at|\bworth\b|headcount|employees\b|employs|workforce|staff of|"
+    r"funding|raised|\bseries [a-h]\b|tender offer|revenue|\bipo\b|layoffs?|laid off|market cap|"
+    r"(?:us)?\$\s?\d[\d,.]*\s?(?:billion|million|trillion|bn|mn)\b|"  # bare "$33.7 billion" / "$7 million"
+    rf"~?{_BIG}\+?[ -](?:employees?|people|staff|workers|associates|team members)\b",  # "67,400-employee", "~8,000 people"
     re.I,
 )
 NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)*")
@@ -42,13 +48,14 @@ REJECT_REASONS = {
     "quote-too-short": f"quote has fewer than {MIN_QUOTE_WORDS} words",
     "quote-not-found": "exact_quote does not appear in the source text",
     "number-not-in-quote": "the fact contains a number its quote doesn't",
+    "wrong-subject": "the fact is about the publishing site, another company, or isn't about the target company's own process/role",
     "undated-time-sensitive": "time-sensitive fact from an undated source",
     "duplicate": "same fact already grounded",
 }
 
 EXTRACT_SYSTEM_PROMPT = f"""You extract facts for a student's interview-prep brief from ONE web page.
 Return JSON only, no prose:
-{{"facts": [{{"fact": "...", "exact_quote": "...", "section": "company|interview|role", "stage": "oa|phone-screen|team-screen|onsite|unknown", "is_forum": true|false}}]}}
+{{"facts": [{{"fact": "...", "exact_quote": "...", "section": "company|interview|role", "stage": "oa|phone-screen|team-screen|onsite|unknown", "level": "intern|new-grad|experienced|unknown", "about_company": true|false}}]}}
 Rules:
 - exact_quote: copied VERBATIM from the page text, one contiguous span of about 5-40 words that states the fact.
   Do not fix typos, reorder, or join separate passages.
@@ -61,9 +68,14 @@ Rules:
   "team-screen" = team/hiring-manager conversation; "onsite" = onsite / virtual onsite / final loop.
   Use "unknown" when the text does not say which stage, e.g. general tips. One fact = one stage: if the
   quote covers several stages, make separate facts with separate quotes.
+- level (interview facts only; use "unknown" otherwise): the seniority of the candidate whose process the page describes:
+  "intern" = internship, "new-grad" = new graduate / university hire / entry level, "experienced" = full-time
+  industry hire, senior, staff, "unknown" = the page doesn't say.
+- about_company: true ONLY if the fact is about the target company's own interview process, role, products or
+  news. false if it is about the website or service that published the page (e.g. a prep site's own practice
+  tool, course, mentors, pricing or feedback), about another company, or is generic with nothing specific to this company.
 - If the page title or quote hedges ("may", "reportedly", "considering"), keep that hedge in the fact.
 - Skip facts about other companies, and about other seniority levels than the candidate's.
-- is_forum: true if the page is a forum/discussion post (Reddit, Blind, LeetCode discuss).
 - At most {MAX_FACTS_PER_SOURCE} facts, the most useful first. If nothing is relevant return {{"facts": []}}."""
 
 
@@ -82,10 +94,12 @@ def source_text(source: dict) -> tuple[str, str]:
 
 # ---------- extraction (LLM) + cache ----------
 
-def _cache_path(url: str, company: str, role: str, level: str, text_kind: str, text_for_key: str | None = None) -> str:
-    # The prompt mentions company/role/level, so they are part of the key along with URL + prompt version.
-    # text_kind keeps snippet-based and full-page extractions of the same URL apart.
-    key = "|".join([PROMPT_VERSION, url, company.lower(), role.lower(), level, text_kind])
+def _cache_path(url: str, company: str, role: str, level: str, text_kind: str, model: str,
+                text_for_key: str | None = None) -> str:
+    # Key: URL + prompt version + the model that extracted. Company/role/level are in the prompt too, and text_kind
+    # keeps snippet-based and full-page extractions of the same URL apart. A different model = a different entry,
+    # so switching models never serves another model's facts; the prompt version changes only when the prompt does.
+    key = "|".join([PROMPT_VERSION, model, url, company.lower(), role.lower(), level, text_kind])
     if text_for_key is not None:  # a pasted JD has no real URL: key on its text instead
         key += "|" + hashlib.sha256(text_for_key.encode()).hexdigest()
     return os.path.join(CACHE_DIR, hashlib.sha256(key.encode()).hexdigest()[:32] + ".json")
@@ -104,7 +118,9 @@ def extract_facts(source: dict, company: str, role: str, level: str, use_cache: 
     """LLM-extract candidate facts from one source's text (full page or snippet). Returns (facts, came_from_cache)."""
     text, text_kind = source_text(source)
     is_jd = source["url"].startswith("jd://")
-    path = _cache_path(source["url"], company, role, level, text_kind, text if is_jd else None)
+    provider, model = llm.get_settings("extract")
+    model_id = f"{provider}/{model}"
+    path = _cache_path(source["url"], company, role, level, text_kind, model_id, text if is_jd else None)
     if use_cache and os.path.exists(path):
         with open(path) as f:
             return json.load(f)["facts"], True
@@ -114,10 +130,10 @@ def extract_facts(source: dict, company: str, role: str, level: str, use_cache: 
         f"URL: {source['url']}\nPublished: {source.get('published_date') or 'unknown'}\n\n"
         f"Page text{' (search snippet only)' if text_kind == 'snippet' else ''}:\n{text}"
     )
-    facts = parse_facts(llm.generate(EXTRACT_SYSTEM_PROMPT, user))
+    facts = parse_facts(llm.generate(EXTRACT_SYSTEM_PROMPT, user, task="extract"))
     os.makedirs(CACHE_DIR, exist_ok=True)
     with open(path, "w") as f:  # cached even when caching is off for reading, so the next normal run benefits
-        json.dump({"url": source["url"], "prompt_version": PROMPT_VERSION, "facts": facts}, f, indent=2)
+        json.dump({"url": source["url"], "prompt_version": PROMPT_VERSION, "model": model_id, "facts": facts}, f, indent=2)
     return facts, False
 
 
@@ -143,12 +159,34 @@ def add_hedge(sentence: str) -> str:
     return f"Reportedly, {sentence}"
 
 
-def ground(candidates: list[dict], sources: dict, already: list[dict] | None = None) -> tuple[list[dict], list[dict]]:
+def publisher_label(url: str) -> str:
+    """The site's own name from its host: 'www.extern.com' -> 'extern', 'prep.co.uk' -> 'prep'."""
+    parts = (urlparse(url).hostname or "").lower().removeprefix("www.").split(".")
+    if len(parts) >= 3 and parts[-2] in ("co", "com", "org", "net", "ac"):
+        return parts[-3]
+    return parts[-2] if len(parts) >= 2 else ""
+
+
+def about_publisher_not_company(fact: str, src: dict, company: str | None) -> str | None:
+    """The publisher's brand name (e.g. 'Extern') appears in the fact but the company's doesn't: the fact
+    describes the site's own offering. Returns that brand name, or None."""
+    if not company or src.get("kind") == "company":
+        return None
+    label = publisher_label(src["url"])
+    slug = re.sub(r"[^a-z0-9]", "", company.lower())
+    if len(label) < 4 or slug in label or slug in re.sub(r"[^a-z0-9]", "", fact.lower()):
+        return None
+    return label if re.search(rf"\b{re.escape(label)}\b", fact, re.I) else None
+
+
+def ground(candidates: list[dict], sources: dict, already: list[dict] | None = None, company: str | None = None) -> tuple[list[dict], list[dict]]:
     """Keep candidates whose quote is really in their source. Returns (grounded, rejected).
 
-    Each candidate must carry `source_id`. Grounded facts get `is_forum` from the source's
-    domain (not from the LLM), `published_date` from the source, `grounded_in` ("full" or "snippet"),
-    `stage` (interview facts), and `hedged` (the source title is hedged, so the fact text is made to be too).
+    Each candidate must carry `source_id`. Grounded facts get `published_date` from the source, `grounded_in`
+    ("full" or "snippet"), `stage` and `level` (interview facts), `hedged` (the source title is hedged, so the
+    fact text is made to be too), and `is_experience`: an interview fact from a first-person source (Reddit,
+    LeetCode discuss, a blog). Role or company facts from those sites (a job repost) are not experiences.
+    Facts about the publishing site or another company are rejected as wrong-subject.
     """
     grounded: list[dict] = []
     rejected: list[dict] = []
@@ -169,6 +207,10 @@ def ground(candidates: list[dict], sources: dict, already: list[dict] | None = N
             reject(c, "quote-too-short")
         elif nquote not in normalize(text):
             reject(c, "quote-not-found")
+        elif c.get("about_company") is False:
+            reject(c, "wrong-subject")
+        elif (brand := about_publisher_not_company(fact, src, company)):
+            reject({**c, "detail": f"describes {brand}'s own offering"}, "wrong-subject")
         elif any(n not in NUMBER_RE.findall(quote) for n in NUMBER_RE.findall(fact)):
             reject(c, "number-not-in-quote")
         elif TIME_SENSITIVE_RE.search(fact) and not src.get("published_date"):
@@ -182,15 +224,38 @@ def ground(candidates: list[dict], sources: dict, already: list[dict] | None = N
             if hedged and not HEDGE_WORD_RE.search(fact):
                 fact = add_hedge(fact)
             stage = c.get("stage") if c.get("stage") in STAGES else "unknown"
+            level = c.get("level") if c.get("level") in LEVELS else "unknown"
             grounded.append({
                 "fact": fact,
                 "exact_quote": quote.strip(),
                 "section": section,
-                "is_forum": src["kind"] == "forum",
+                "is_experience": section == "interview" and src["kind"] in EXPERIENCE_KINDS,
                 "source_id": c["source_id"],
                 "published_date": src.get("published_date"),
                 "grounded_in": text_kind,
                 "stage": stage if section == "interview" else "",
+                "level": level if section == "interview" else "",
                 "hedged": hedged,
             })
     return grounded, rejected
+
+
+# ---------- the posting's location (code only) ----------
+
+def location_fact(sid: str, source: dict, location: str | None) -> dict | None:
+    """A grounded role fact saying where the posting's job is, taken verbatim from the page (or None).
+
+    Built directly from the text, so it is grounded by construction. `pinned` keeps it out of the writer's fact cap.
+    """
+    from search import posting_location
+
+    found = posting_location(source, location)
+    if not found or normalize(found["quote"]) not in normalize(source["full_text"]):
+        return None
+    place = found["place"]
+    where = " (outside " + location + ")" if location and found["class"] == "other" else ""
+    return {
+        "fact": f"Posting location: {place}{where}.", "exact_quote": found["quote"], "section": "role",
+        "is_experience": False, "source_id": sid, "published_date": source.get("published_date"),
+        "grounded_in": "full", "stage": "", "level": "", "hedged": False, "pinned": True,
+    }

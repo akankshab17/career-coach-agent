@@ -2,6 +2,7 @@ from datetime import date
 
 import pytest
 
+import brief
 import graph
 import helpers
 import llm
@@ -59,10 +60,10 @@ def world(monkeypatch):
     seen = {"search_more": [], "llm": []}
     helpers.TEXTS.update(helpers_texts)
 
-    def fake_gather(company, role, level, jd, today=None):
+    def fake_gather(company, role, level, jd, today=None, **kw):
         return {"company": [res(1, url=NEWS)], "interview": [res(2, url=REDDIT)], "posting": []}
 
-    def fake_search_more(company, role, level, section, known_urls, filtered_out=None):
+    def fake_search_more(company, role, level, section, known_urls, filtered_out=None, **kw):
         seen["search_more"].append(section)
         return [res(3, "Software Engineer, New Grad", POSTING)] if section == "role" else []
 
@@ -134,7 +135,7 @@ def test_unfetchable_reddit_post_is_grounded_from_its_snippet(world, monkeypatch
     del helpers.TEXTS[REDDIT]  # Tavily can't extract Reddit
     snippet = helpers_texts[REDDIT]
 
-    def gather(company, role, level, jd, today=None):
+    def gather(company, role, level, jd, today=None, **kw):
         return {"company": [res(1, url=NEWS)], "interview": [res(2, url=REDDIT, content=snippet)], "posting": []}
 
     monkeypatch.setattr(graph, "gather_research", gather)
@@ -161,7 +162,7 @@ def test_filtered_sources_are_logged_and_listed_in_the_debug_file(world, monkeyp
     off_topic = {"url": "https://www.reddit.com/r/FPGA/1", "title": "Google Silicon Engineering Intern interview",
                  "reason": "other-role-family (wanted software)"}
 
-    def gather(company, role, level, jd, today=None):
+    def gather(company, role, level, jd, today=None, **kw):
         return {"company": [res(1, url=NEWS)], "interview": [res(2, url=REDDIT)], "posting": [], "filtered": [off_topic]}
 
     monkeypatch.setattr(graph, "gather_research", gather)
@@ -184,8 +185,8 @@ def test_debug_file_keeps_the_raw_draft_and_says_whether_it_was_cut_off(world):
 def test_cut_off_draft_is_reported(world, monkeypatch, capsys):
     real = llm.generate
 
-    def truncating(system, user):
-        out = real(system, user)
+    def truncating(system, user, **kw):
+        out = real(system, user, **kw)
         if "interview-prep briefs" in system:
             llm._truncated += 1  # what _chat does when finish_reason == "length"
         return out
@@ -195,3 +196,175 @@ def test_cut_off_draft_is_reported(world, monkeypatch, capsys):
     assert result.stats.draft_truncated
     assert "(DRAFT WAS CUT OFF by the token limit)" in capsys.readouterr().err
     assert "Draft cut off by the token limit: YES" in result.stats.debug_report(result.sources)
+
+
+# ---- stopping early ----
+
+def test_writer_uses_the_write_task_and_extraction_the_extract_task(world, monkeypatch):
+    tasks = []
+    monkeypatch.setattr(llm, "generate", helpers.fake_llm(EXTRACTED, WRITER, tasks=tasks))
+    graph.run_pipeline("Acme", "Software Engineer", "new-grad", None, today=TODAY)
+    assert tasks == ["extract", "extract", "extract", "write"]
+
+
+def test_daily_limit_mid_extraction_stops_the_run_immediately(world, monkeypatch, capsys, tmp_path):
+    extracted = []
+
+    def generate(system, user, task="write"):
+        if task == "extract":
+            extracted.append(task)
+            if len(extracted) == 2:
+                raise llm.QuotaExceededError("groq daily limit reached on openai/gpt-oss-20b. Retrying won't help: try again in 8m 35s.")
+            return '{"facts": []}'
+        pytest.fail("must not write")
+
+    monkeypatch.setattr(llm, "generate", generate)
+    out_file = tmp_path / "brief.md"
+    with pytest.raises(SystemExit) as stop:
+        main.main(["--company", "Acme", "--role", "Software Engineer", "-o", str(out_file)])
+    assert "Run stopped: groq daily limit reached" in str(stop.value) and "8m 35s" in str(stop.value)
+    assert len(extracted) == 2  # the third source was never tried
+    assert world["search_more"] == []  # no follow-up search either
+    assert not out_file.exists()
+    debug = (tmp_path / "brief.debug.md").read_text()
+    assert "[search]" in debug and "[fetch]" in debug and "# Run stopped" in debug and "8m 35s" in debug
+    err = capsys.readouterr().err
+    assert "[llm]" in err and "partial run report" in err
+
+
+def test_all_extractions_failing_stops_before_search_more_and_write(world, monkeypatch):
+    calls = []
+
+    def generate(system, user, task="write"):
+        calls.append(task)
+        if task == "extract":
+            return "sorry, I cannot produce JSON"
+        pytest.fail("must not write")
+
+    monkeypatch.setattr(llm, "generate", generate)
+    stats = brief.RunStats()
+    with pytest.raises(graph.PipelineError) as err:
+        graph.run_pipeline("Acme", "Software Engineer", "new-grad", None, today=TODAY, stats=stats)
+    assert "Every fact extraction failed (2 of 2 sources)" in str(err.value) and "did not return" in str(err.value)
+    assert isinstance(err.value, llm.LLMError)
+    assert calls == ["extract", "extract"] and world["search_more"] == []
+    assert len(stats.extract_errors) == 2 and stats.steps[-1].startswith("[extract]")  # the log survives for debugging
+
+
+def test_all_extractions_failing_in_the_retry_round_still_writes_from_earlier_facts(world, monkeypatch):
+    base = helpers.fake_llm(EXTRACTED, WRITER)
+
+    def generate(system, user, task="write"):
+        if task == "extract" and POSTING in user:
+            raise llm.LLMError("boom")  # only the retry round's source fails
+        return base(system, user, task)
+
+    monkeypatch.setattr(llm, "generate", generate)
+    result = graph.run_pipeline("Acme", "Software Engineer", "new-grad", None, today=TODAY)
+    assert world["search_more"] == ["role"] and "Acme builds payment software" in result.text
+    assert len(result.stats.extract_errors) == 1
+
+
+def test_a_bad_key_stops_extraction_after_one_call(world, monkeypatch):
+    calls = []
+
+    def generate(system, user, task="write"):
+        calls.append(task)
+        raise llm.FatalLLMError("GROQ_API_KEY is not set. Add it to your .env file.")
+
+    monkeypatch.setattr(llm, "generate", generate)
+    with pytest.raises(llm.FatalLLMError):
+        graph.run_pipeline("Acme", "Software Engineer", "new-grad", None, today=TODAY)
+    assert calls == ["extract"]
+
+
+# ---- location ----
+
+def research_with_posting(page_text, seen=None):
+    def gather(company, role, level, jd, today=None, **kw):
+        if seen is not None:
+            seen.update(kw)
+        posting = res(3, "Software Engineer, New Grad", POSTING, full_text=page_text)
+        return {"company": [res(1, url=NEWS)], "interview": [res(2, url=REDDIT)], "posting": [posting]}
+    return gather
+
+
+def test_the_posting_location_always_appears_first_in_section_3(world, monkeypatch):
+    page = helpers_texts[POSTING] + "\nLocation: Wuhan, China\n"
+    monkeypatch.setattr(graph, "gather_research", research_with_posting(page))
+    result = graph.run_pipeline("Acme", "Software Engineer", "new-grad", None, today=TODAY)  # default location: United States
+    section3 = result.text.split("## 3. ")[1].split("## 4.")[0]
+    lines = [l for l in section3.splitlines()[1:] if l.strip()]
+    assert lines[0].startswith("Posting location: Wuhan, China (outside United States)")  # the writer never mentioned it
+    assert f"({POSTING})" in lines[0]  # cited to the posting
+    assert "You will build APIs for merchants" in section3
+    debug = result.stats.debug_report(result.sources)
+    assert "Posting location: Wuhan, China (outside United States)." in debug
+
+
+def test_a_posting_in_the_wanted_location_is_shown_without_a_warning(world, monkeypatch):
+    page = helpers_texts[POSTING] + "\nLocations: New York, Seattle, South San Francisco\n"
+    monkeypatch.setattr(graph, "gather_research", research_with_posting(page))
+    result = graph.run_pipeline("Acme", "Software Engineer", "new-grad", None, today=TODAY)
+    assert "Posting location: New York, Seattle, South San Francisco" in result.text and "outside" not in result.text
+
+
+def test_no_location_fact_when_the_page_names_no_place(world, monkeypatch):
+    monkeypatch.setattr(graph, "gather_research", research_with_posting(helpers_texts[POSTING]))
+    result = graph.run_pipeline("Acme", "Software Engineer", "new-grad", None, today=TODAY)
+    assert "Posting location" not in result.text
+
+
+def test_the_location_reaches_the_searches_and_the_cli_flag_sets_it(world, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(graph, "gather_research", research_with_posting(helpers_texts[POSTING], seen))
+    graph.run_pipeline("Acme", "Software Engineer", "new-grad", None, today=TODAY)
+    assert seen["location"] == "United States"
+
+    seen.clear()
+    graph.run_pipeline("Acme", "Software Engineer", "new-grad", None, today=TODAY, location="India")
+    assert seen["location"] == "India"
+
+
+def test_cli_location_flag(world, monkeypatch, tmp_path):
+    seen = {}
+    monkeypatch.setattr(graph, "gather_research", research_with_posting(helpers_texts[POSTING], seen))
+    out = tmp_path / "b.md"
+    main.main(["--company", "Acme", "--role", "Software Engineer", "-o", str(out)])
+    assert seen["location"] == "United States"
+    main.main(["--company", "Acme", "--role", "Software Engineer", "--location", "India", "-o", str(out)])
+    assert seen["location"] == "India"
+
+
+def test_search_more_gets_the_location(world, monkeypatch):
+    got = {}
+
+    def search_more(company, role, level, section, known_urls, filtered_out=None, location=None):
+        got["location"] = location
+        return []
+
+    monkeypatch.setattr(graph, "search_more", search_more)
+    graph.run_pipeline("Acme", "Software Engineer", "new-grad", None, today=TODAY, location="Canada")
+    assert got["location"] == "Canada"
+
+
+# ---- subject + level flow through the whole pipeline ----
+
+def test_wrong_subject_facts_are_rejected_and_counted_in_the_ground_line(world, monkeypatch, capsys):
+    extern = "https://www.extern.com/post/acme-guide"
+    helpers.TEXTS[extern] = "Extern's virtual internship program gives honest feedback. Acme interviews include a coding screen."
+    extracted = {**EXTRACTED, extern: [
+        {"fact": "Extern's virtual program gives honest feedback.", "exact_quote": "Extern's virtual internship program gives honest feedback",
+         "section": "interview"},
+        {"fact": "Acme interviews include a coding screen.", "exact_quote": "Acme interviews include a coding screen", "section": "interview"},
+    ]}
+    monkeypatch.setattr(llm, "generate", helpers.fake_llm(extracted, WRITER))
+
+    def gather(company, role, level, jd, today=None, **kw):
+        return {"company": [res(1, url=NEWS)], "interview": [res(2, url=REDDIT), res(4, url=extern)], "posting": []}
+
+    monkeypatch.setattr(graph, "gather_research", gather)
+    result = graph.run_pipeline("Acme", "Software Engineer", "new-grad", None, today=TODAY)
+    assert "1 wrong-subject" in capsys.readouterr().err
+    debug = result.stats.debug_report(result.sources)
+    assert "[wrong-subject]" in debug and "describes extern's own offering" in debug

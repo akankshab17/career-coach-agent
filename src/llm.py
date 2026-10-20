@@ -5,16 +5,24 @@ Everything else calls generate(system_prompt, user_prompt) -> text.
 from __future__ import annotations
 
 import os
+import re
 import sys
 import time
 from dataclasses import dataclass
 
 DEFAULT_PROVIDER = "groq"
-DEFAULT_MODELS = {"groq": "openai/gpt-oss-120b", "openai": "gpt-4o-mini"}
+# Two jobs, two models: many small extraction calls on a cheaper model, one writing call on the best one.
+TASKS = ("extract", "write")
+TASK_ENV = {"extract": "EXTRACT_MODEL", "write": "WRITE_MODEL"}
+DEFAULT_MODELS = {
+    "groq": {"extract": "openai/gpt-oss-20b", "write": "openai/gpt-oss-120b"},
+    "openai": {"extract": "gpt-4o-mini", "write": "gpt-4o-mini"},
+}
 
 # USD per 1M tokens: (input, output). Models not listed show cost as n/a.
 PRICES = {
     ("groq", "openai/gpt-oss-120b"): (0.0, 0.0),  # free tier
+    ("groq", "openai/gpt-oss-20b"): (0.0, 0.0),
     ("openai", "gpt-4o-mini"): (0.15, 0.60),
 }
 
@@ -26,6 +34,14 @@ _sleep = time.sleep  # replaced in tests
 
 class LLMError(Exception):
     """Raised with a user-readable message when the LLM call cannot succeed."""
+
+
+class FatalLLMError(LLMError):
+    """Retrying, or trying other calls, is pointless (daily quota, bad key). Callers must stop the run."""
+
+
+class QuotaExceededError(FatalLLMError):
+    """A daily limit (tokens/requests per day) or account quota is used up."""
 
 
 @dataclass
@@ -41,18 +57,21 @@ class CallRecord:
 _calls: list[CallRecord] = []
 
 
-def get_settings() -> tuple[str, str]:
+def get_settings(task: str = "write") -> tuple[str, str]:
+    """(provider, model) for a task. Model precedence: EXTRACT_MODEL/WRITE_MODEL, then LLM_MODEL, then the default."""
     provider = (os.getenv("LLM_PROVIDER") or DEFAULT_PROVIDER).strip().lower()
     if provider not in DEFAULT_MODELS:
         raise LLMError(f"Unknown LLM_PROVIDER '{provider}'. Use one of: {', '.join(DEFAULT_MODELS)}.")
-    model = (os.getenv("LLM_MODEL") or "").strip() or DEFAULT_MODELS[provider]
+    if task not in TASKS:
+        raise ValueError(f"unknown task {task!r}; use one of {TASKS}")
+    model = (os.getenv(TASK_ENV[task]) or "").strip() or (os.getenv("LLM_MODEL") or "").strip() or DEFAULT_MODELS[provider][task]
     return provider, model
 
 
 def _require_key(name: str) -> str:
     key = os.getenv(name)
     if not key:
-        raise LLMError(f"{name} is not set. Add it to your .env file.")
+        raise FatalLLMError(f"{name} is not set. Add it to your .env file.")
     return key
 
 
@@ -93,14 +112,66 @@ def _call_openai(model, system_prompt, user_prompt):
 
 _PROVIDERS = {"groq": _call_groq, "openai": _call_openai}
 _RETRYABLE = ("RateLimitError", "APITimeoutError", "APIConnectionError", "InternalServerError")
+_AUTH_ERRORS = ("AuthenticationError", "PermissionDeniedError")
+DAILY_LIMIT_RE = re.compile(r"per day|\(TPD\)|\(RPD\)|insufficient_quota|exceeded your current quota", re.I)
+MAX_RETRY_AFTER = 30  # per-minute limits: wait what the provider asks, but never longer than this
 
 
-def _is_retryable(exc: Exception) -> bool:
-    return type(exc).__name__ in _RETRYABLE
+def _error_text(exc: Exception) -> str:
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        error = body.get("error", body)
+        if isinstance(error, dict) and error.get("message"):
+            return f"{error['message']} {error.get('code', '')}".strip()
+    return str(exc)
 
 
-def generate(system_prompt: str, user_prompt: str) -> str:
-    provider, model = get_settings()
+def parse_wait_seconds(text: str, headers=None) -> float | None:
+    """Seconds the provider asks us to wait: 'try again in 8m34.56s' / '1h2m3s' / '250ms', else a Retry-After header."""
+    m = re.search(r"try again in\s+((?:\d+(?:\.\d+)?\s*(?:h|m(?!s)|ms|s)\s*)+)", text, re.I)
+    if m:
+        parts = re.findall(r"(\d+(?:\.\d+)?)\s*(ms|h|m|s)", m.group(1), re.I)
+        unit = {"h": 3600, "m": 60, "s": 1, "ms": 0.001}
+        return sum(float(n) * unit[u.lower()] for n, u in parts)
+    try:
+        return float((headers or {}).get("retry-after"))
+    except (TypeError, ValueError):
+        return None
+
+
+def format_wait(seconds: float | None) -> str:
+    if seconds is None:
+        return "an unknown time (Groq did not say)"
+    total = int(round(seconds))
+    h, rem = divmod(total, 3600)
+    m, sec = divmod(rem, 60)
+    text = " ".join(part for part in (f"{h}h" if h else "", f"{m}m" if m else "", f"{sec}s" if sec or not (h or m) else "") if part)
+    return f"{text} (around {time.strftime('%H:%M', time.localtime(time.time() + seconds))} local time)"
+
+
+def _classify(exc: Exception, provider: str, model: str) -> LLMError | float | None:
+    """A FatalLLMError for quota/auth problems; a wait in seconds for a retryable per-minute 429; None = plain retry."""
+    name = type(exc).__name__
+    text = _error_text(exc)
+    headers = getattr(getattr(exc, "response", None), "headers", None)
+    if name in _AUTH_ERRORS:
+        return FatalLLMError(f"{provider} rejected the API key ({name}). Check it in your .env file.")
+    if name == "RateLimitError":
+        wait = parse_wait_seconds(text, headers)
+        if DAILY_LIMIT_RE.search(text):
+            return QuotaExceededError(
+                f"{provider} daily limit reached on {model}. Retrying won't help: try again in {format_wait(wait)}.\n"
+                f"{provider} said: {text[:300]}\n"
+                "Fact extractions finished so far are cached in .cache/extract, so a re-run continues where this stopped. "
+                "You can also switch model (EXTRACT_MODEL / WRITE_MODEL) or LLM_PROVIDER in .env."
+            )
+        return wait
+    return None
+
+
+def generate(system_prompt: str, user_prompt: str, task: str = "write") -> str:
+    """Call the configured model for `task` ("extract" or "write") and record tokens, latency and cost."""
+    provider, model = get_settings(task)
     call = _PROVIDERS[provider]
 
     for attempt in range(RETRIES + 1):
@@ -111,7 +182,10 @@ def generate(system_prompt: str, user_prompt: str) -> str:
         except LLMError:
             raise
         except Exception as exc:
-            if not _is_retryable(exc):
+            verdict = _classify(exc, provider, model)
+            if isinstance(verdict, LLMError):
+                raise verdict from exc
+            if type(exc).__name__ not in _RETRYABLE:
                 raise LLMError(f"{provider} call failed: {type(exc).__name__}: {exc}") from exc
             if attempt == RETRIES:
                 raise LLMError(
@@ -119,7 +193,9 @@ def generate(system_prompt: str, user_prompt: str) -> str:
                     f"({type(exc).__name__}: {exc}). Wait a bit and try again."
                 ) from exc
             wait = BACKOFF_SECONDS * 2**attempt
-            print(f"[llm] {type(exc).__name__}; retrying in {wait}s ({attempt + 1}/{RETRIES})", file=sys.stderr)
+            if verdict is not None:  # the provider told us how long: honour it (up to a cap)
+                wait = max(wait, min(verdict + 0.5, MAX_RETRY_AFTER))
+            print(f"[llm] {type(exc).__name__} on {model}; retrying in {wait:.1f}s ({attempt + 1}/{RETRIES})", file=sys.stderr)
             _sleep(wait)
     latency = time.perf_counter() - start
 
@@ -153,18 +229,24 @@ def reset_usage() -> None:
 
 
 def summary_line() -> str:
-    """One-line usage summary, totalled over every LLM call made since reset_usage()."""
+    """One-line usage summary over every LLM call since reset_usage(), with tokens per model."""
     if not _calls:
         return "[llm] no calls made"
-    last = _calls[-1]
     in_tok = sum(c.input_tokens for c in _calls)
     out_tok = sum(c.output_tokens for c in _calls)
     latency = sum(c.latency for c in _calls)
     costs = [c.cost for c in _calls]
     cost = "n/a (no price configured)" if None in costs else f"${sum(costs):.4f}"
+    per_model: dict[str, list[int]] = {}
+    for c in _calls:
+        row = per_model.setdefault(c.model, [0, 0, 0])
+        row[0] += 1
+        row[1] += c.input_tokens
+        row[2] += c.output_tokens
+    by_model = "; ".join(f"{m} {n} calls in={i} out={o}" for m, (n, i, o) in per_model.items())
     return (
-        f"[llm] provider={last.provider} model={last.model} calls={len(_calls)} in={in_tok} tok "
-        f"out={out_tok} tok latency={latency:.1f}s est_cost={cost}"
+        f"[llm] provider={_calls[-1].provider} calls={len(_calls)} in={in_tok} tok out={out_tok} tok "
+        f"latency={latency:.1f}s est_cost={cost} | by model: {by_model}"
     )
 
 
@@ -177,7 +259,7 @@ if __name__ == "__main__":
         sys.exit("Usage: python src/llm.py models [groq|openai]")
     try:
         provider = sys.argv[2] if len(sys.argv) > 2 else get_settings()[0]
-        print(f"# {provider} models (default: {DEFAULT_MODELS.get(provider)})")
+        print(f"# {provider} models (defaults: {DEFAULT_MODELS.get(provider)})")
         print("\n".join(list_models(provider)))
     except LLMError as exc:
         sys.exit(f"Error: {exc}")

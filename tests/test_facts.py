@@ -18,7 +18,7 @@ def sources(published=None, kind="other", text=PAGE, title="Some page"):
 
 
 def cand(fact, quote, section="interview"):
-    return {"fact": fact, "exact_quote": quote, "section": section, "is_forum": False, "source_id": "S1"}
+    return {"fact": fact, "exact_quote": quote, "section": section, "is_experience": False, "source_id": "S1"}
 
 
 # ---- grounding ----
@@ -66,10 +66,10 @@ def test_short_malformed_and_duplicate_candidates_rejected():
     assert facts.ground([good], sources(), already=grounded)[1][0]["reason"] == "duplicate"
 
 
-def test_is_forum_comes_from_the_source_domain_not_the_llm():
-    c = {**cand("The loop has 4 rounds.", "new-grad loop has 4 rounds"), "is_forum": False}
+def test_is_experience_comes_from_the_source_domain_not_the_llm():
+    c = {**cand("The loop has 4 rounds.", "new-grad loop has 4 rounds"), "is_experience": False}
     grounded, _ = facts.ground([c], sources(kind="forum"))
-    assert grounded[0]["is_forum"] is True
+    assert grounded[0]["is_experience"] is True
 
 
 # ---- parsing ----
@@ -203,3 +203,134 @@ def test_already_hedged_or_unhedged_titles_are_left_alone():
 def test_add_hedge_lowercases_only_common_starters():
     assert facts.add_hedge("The deal is big.") == "Reportedly, the deal is big."
     assert facts.add_hedge("Stripe is buying X.") == "Reportedly, Stripe is buying X."
+
+
+# ---- model routing + cache key ----
+
+def test_extraction_uses_the_extract_task_and_model_is_part_of_the_cache_key(monkeypatch):
+    tasks = []
+    calls = []
+    monkeypatch.setattr(llm, "generate", helpers.fake_llm({"https://example.com/1": [cand("f", "q")]}, "", calls, tasks))
+    src = sources()["S1"]
+
+    facts.extract_facts(src, "Stripe", "SWE", "new-grad")
+    assert tasks == ["extract"]
+
+    facts.extract_facts(src, "Stripe", "SWE", "new-grad")  # same model: cached
+    assert len(calls) == 1
+
+    monkeypatch.setenv("EXTRACT_MODEL", "openai/gpt-oss-120b")  # different model: its own entry, same prompt version
+    _, cached = facts.extract_facts(src, "Stripe", "SWE", "new-grad")
+    assert cached is False and len(calls) == 2
+    assert facts.PROMPT_VERSION == "extract-v3"  # a model change doesn't bump the prompt version
+
+    monkeypatch.delenv("EXTRACT_MODEL")  # back to the default model: first entry is still there
+    _, cached = facts.extract_facts(src, "Stripe", "SWE", "new-grad")
+    assert cached is True and len(calls) == 2
+
+    saved = {json.load(open(os.path.join(facts.CACHE_DIR, f)))["model"] for f in os.listdir(facts.CACHE_DIR)}
+    assert saved == {"groq/openai/gpt-oss-20b", "groq/openai/gpt-oss-120b"}
+
+
+# ---- wrong subject ----
+
+EXTERN_PAGE = ("Extern's virtual internship program gives you honest feedback on every answer. "
+               "The Cummins interview includes a HireVue recorded behavioral round. Cummins is based in Columbus.")
+
+
+def extern_sources(kind="other"):
+    return {"S1": {"url": "https://www.extern.com/post/cummins-internship-guide", "title": "Cummins Internship Guide",
+                   "full_text": EXTERN_PAGE, "kind": kind, "published_date": None}}
+
+
+def test_facts_about_the_publishing_site_are_rejected_as_wrong_subject():
+    own_practice = cand("Extern's virtual internship program gives honest feedback on every answer.",
+                        "Extern's virtual internship program gives you honest feedback on every answer")
+    about_cummins = cand("The Cummins interview includes a HireVue recorded behavioral round.",
+                         "The Cummins interview includes a HireVue recorded behavioral round")
+    grounded, rejected = facts.ground([own_practice, about_cummins], extern_sources(), company="Cummins")
+    assert [g["fact"] for g in grounded] == [about_cummins["fact"]]
+    assert rejected[0]["reason"] == "wrong-subject" and "Extern" in rejected[0]["detail"] or "extern" in rejected[0]["detail"]
+    assert "wrong-subject" in facts.REJECT_REASONS
+
+
+def test_extractor_can_flag_a_fact_as_not_about_the_company():
+    flagged = {**cand("The process provides honest feedback on every answer.", "gives you honest feedback on every answer"),
+               "about_company": False}
+    unflagged = cand("The process provides honest feedback on every answer.", "gives you honest feedback on every answer")
+    assert facts.ground([flagged], extern_sources(), company="Cummins")[1][0]["reason"] == "wrong-subject"
+    assert len(facts.ground([unflagged], extern_sources(), company="Cummins")[0]) == 1  # field missing: not rejected
+    explicit_yes = {**unflagged, "about_company": True}
+    assert len(facts.ground([explicit_yes], extern_sources(), company="Cummins")[0]) == 1
+
+
+def test_the_companys_own_site_is_never_a_wrong_subject():
+    src = {"S1": {"url": "https://www.cummins.com/careers", "title": "Careers", "kind": "company", "published_date": None,
+                  "full_text": "Cummins careers: Cummins builds engines and hires interns every summer."}}
+    c = cand("Cummins hires interns every summer.", "Cummins builds engines and hires interns every summer", "company")
+    assert len(facts.ground([c], src, company="Cummins")[0]) == 1
+
+
+def test_publisher_label():
+    assert facts.publisher_label("https://www.extern.com/post/x") == "extern"
+    assert facts.publisher_label("https://prep.co.uk/guide") == "prep"
+    assert facts.publisher_label("https://interviewing.io/google") == "interviewing"
+
+
+def test_extraction_prompt_asks_for_level_and_subject():
+    assert '"level": "intern|new-grad|experienced|unknown"' in facts.EXTRACT_SYSTEM_PROMPT
+    assert "about_company" in facts.EXTRACT_SYSTEM_PROMPT and "website or service that published the page" in facts.EXTRACT_SYSTEM_PROMPT
+    assert "is_forum" not in facts.EXTRACT_SYSTEM_PROMPT
+    assert facts.PROMPT_VERSION == "extract-v3"
+
+
+# ---- level tag ----
+
+def test_interview_facts_carry_the_level_their_source_describes():
+    new_grad = {**cand("The onsite has 4 rounds.", "new-grad loop has 4 rounds"), "level": "new-grad"}
+    bogus = {**cand("A phone screen came first.", "a phone screen, then an onsite"), "level": "senior-staff-wizard"}
+    company = {**cand("Stripe was valued at $91.5 billion.", "Stripe was valued at $91.5 billion", "company"), "level": "experienced"}
+    grounded, _ = facts.ground([new_grad, bogus, company], sources(published="2026-01-01"))
+    assert [(g["section"], g["level"]) for g in grounded] == [("interview", "new-grad"), ("interview", "unknown"), ("company", "")]
+
+
+# ---- who is "reporting": first-person sources only ----
+
+def test_candidate_reports_are_interview_facts_from_forums_and_blogs_not_job_reposts():
+    text = "The loop has 4 rounds. You will build APIs for merchants. Stripe builds payments software."
+    interview = cand("The loop has 4 rounds.", "The loop has 4 rounds")
+    repost = cand("You will build APIs for merchants.", "You will build APIs for merchants", "role")
+    news = cand("Stripe builds payments software.", "Stripe builds payments software", "company")
+    cases = {"forum": [True, False, False], "blog": [True, False, False], "other": [False, False, False], "reputable": [False, False, False]}
+    for kind, expected in cases.items():
+        grounded, _ = facts.ground([interview, repost, news], sources(kind=kind, text=text, published="2026-01-01"))
+        assert [g["is_experience"] for g in grounded] == expected, kind
+
+
+# ---- time-sensitive numbers ----
+
+@pytest.mark.parametrize("fact_text", [
+    "The company is a $33.7 billion, ~67,400-employee power-systems manufacturer.",
+    "Revenue was $7 million last year.",
+    "It was bought for $1.1 billion.",
+    "It employs about 8,000 people.",
+    "Stripe has 8,000 employees.",
+    "The group has a 250-person staff of engineers and 12,000 workers.",
+])
+def test_bare_money_amounts_and_headcounts_need_a_dated_source(fact_text):
+    assert facts.TIME_SENSITIVE_RE.search(fact_text)
+    c = cand(fact_text, fact_text.rstrip("."), "company")
+    text = fact_text
+    assert facts.ground([c], sources(text=text, published=None))[1][0]["reason"] == "undated-time-sensitive"
+    assert len(facts.ground([c], sources(text=text, published="2026-03-01"))[0]) == 1
+
+
+@pytest.mark.parametrize("fact_text", [
+    "Three people interviewed me, 2 people on the panel.",
+    "Startups get up to US$350,000 in cloud credits.",
+    "More than 10 million businesses build on Stripe.",
+    "The role pays $120,000 plus equity.",
+    "An employee referral helps.",
+])
+def test_ordinary_numbers_are_not_time_sensitive(fact_text):
+    assert not facts.TIME_SENSITIVE_RE.search(fact_text)

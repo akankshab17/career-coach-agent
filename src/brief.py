@@ -15,6 +15,8 @@ KEY_SECTIONS = ("interview", "role")  # TL;DR is built from these; its coverage 
 DERIVED_SECTIONS = ("how to prepare", "questions to ask")  # may draw conclusions, but must cite facts
 PLACEHOLDER = "No grounded information found for this section."
 NO_INTERVIEW = "No interview reports found."
+MIN_INTERVIEW_FACTS = 3  # fewer than this and the TL;DR opens with a "Limited interview data" warning
+LEVEL_PROCESS = {"intern": "internship process", "new-grad": "new-grad process", "experienced": "full-time process"}
 STAGE_ORDER = ("oa", "phone-screen", "team-screen", "onsite", "unknown")
 STAGE_LABEL = {"oa": "Online assessment", "phone-screen": "Phone screen", "team-screen": "Team screen",
                "onsite": "Onsite", "unknown": "Stage not specified"}
@@ -72,6 +74,7 @@ REWRITE_KINDS = {
     "hedge-added": "fact from a hedged source ('may', 'reportedly'...) given its hedge back",
     "stage-split": "sentence mixed facts from different interview stages; split into one sentence per fact",
     "stage-trim": "TL;DR bullet mixed interview stages; trimmed to its first fact",
+    "level-label": "fact from a different seniority level's process; labelled as such",
 }
 
 
@@ -89,7 +92,8 @@ DROP_REASONS = {
     "number-not-in-facts": "contains a number that isn't in the facts it cites",
     "tldr-interview-without-interview-fact": "TL;DR interview claim not backed by an interview fact",
     "company-section-cap": f"company section already has {COMPANY_MAX_SENTENCES} sentences",
-    "question-logistics-or-rumor": "question about interview logistics, or based on a rumor/unconfirmed/interview fact",
+    "question-logistics-or-rumor": "question about interview logistics, or based on a rumor/unconfirmed fact",
+    "derived-cites-company-news": "'How to prepare' and 'Questions to ask' may cite role or interview facts only, not company news",
 }
 
 
@@ -174,7 +178,7 @@ class RunStats:
                 f"## {n}. [{r['reason']}] {REJECT_REASONS.get(r['reason'], '')}",
                 f"- Fact: {r.get('fact')}",
                 f"- Quote: \"{r.get('exact_quote')}\"",
-                f"- Section: {r.get('section')} | Source: {url(r.get('source_id'))}",
+                f"- Section: {r.get('section')} | Source: {url(r.get('source_id'))}" + (f" | {r['detail']}" if r.get("detail") else ""),
                 "",
             ]
         if self.extract_errors:
@@ -212,7 +216,10 @@ Rules:
 - One fact per sentence, except: combine closely related facts about the same event into one sentence
   citing all of them. Every sentence ends with the fact id(s) it states, like [F3] or [F3][F7].
 - Never write "the acquisition", "the deal", "the company" etc. without naming what it is in that sentence.
-- Facts marked FORUM are anecdotes: start those sentences with "Candidates report".
+- Facts marked CANDIDATE-REPORT are first-person interview experiences (Reddit, LeetCode, blogs): start those
+  sentences with "Candidates report". Other facts are stated plainly.
+- Facts marked LEVEL-MISMATCH describe a different seniority level than the candidate's. Prefer other facts; if you use
+  one, end the sentence with the label shown on the fact, e.g. "(full-time process)".
 - Facts marked HEDGED come from a source that is unconfirmed ("may", "reportedly"). Keep the hedge in your
   sentence (e.g. "Reportedly, ..."); never state them as completed or certain.
 - Interview facts carry a stage (oa, phone-screen, team-screen, onsite, unknown). NEVER combine facts from
@@ -220,7 +227,7 @@ Rules:
 - For company news with a published date, add "(reported Mon YYYY)" from that date.
 - If two facts conflict, use the newer one and say so, citing both.
 - "How to prepare" and "Questions to ask" may draw conclusions from the facts, but every item must cite
-  the fact(s) it is based on.
+  the fact(s) it is based on, and those must be ROLE or INTERVIEW facts. Never base them on company news.
 - Never omit a section. If a section has no facts, write exactly: "No grounded information found for this section."
 - Output markdown with exactly the headings requested, in order."""
 
@@ -239,13 +246,20 @@ def _round_robin_by_source(facts: list[dict], per_source: int | None = None) -> 
         rnd += 1
 
 
-def select_for_writing(facts: list[dict], limit: int = MAX_WRITER_FACTS) -> list[dict]:
+def select_for_writing(facts: list[dict], limit: int = MAX_WRITER_FACTS, level: str | None = None) -> list[dict]:
     """At most `limit` facts for the writer. Posting/role and interview facts come first; company facts get
-    what is left, but never fewer than COMPANY_RESERVE (so section 1 isn't empty). Each group is interleaved
-    across its sources. Returned in original order, so fact ids are stable."""
-    company = _round_robin_by_source([f for f in facts if f["section"] == "company"], COMPANY_FACTS_PER_SOURCE)
-    interview = _round_robin_by_source([f for f in facts if f["section"] == "interview"])
-    role = _round_robin_by_source([f for f in facts if f["section"] == "role"])
+    what is left, but never fewer than COMPANY_RESERVE (so section 1 isn't empty). Interview facts from the
+    candidate's own level (or of unknown level) are preferred over other levels'. Each group is interleaved
+    across its sources. Pinned facts (the posting's location) are always kept. Returned in original order,
+    so fact ids are stable."""
+    pinned = [f for f in facts if f.get("pinned")]
+    pool = [f for f in facts if not f.get("pinned")]
+    limit -= len(pinned)
+    company = _round_robin_by_source([f for f in pool if f["section"] == "company"], COMPANY_FACTS_PER_SOURCE)
+    interview_all = [f for f in pool if f["section"] == "interview"]
+    fits = [f for f in interview_all if not level or f.get("level") in (level, "unknown", "", None)]
+    interview = _round_robin_by_source(fits) + _round_robin_by_source([f for f in interview_all if f not in fits])
+    role = _round_robin_by_source([f for f in pool if f["section"] == "role"])
 
     reserve = min(COMPANY_RESERVE, len(company))
     room = limit - reserve
@@ -255,7 +269,7 @@ def select_for_writing(facts: list[dict], limit: int = MAX_WRITER_FACTS) -> list
     chosen = interview[:interview_quota] + role[:role_quota]
     company_room = min(COMPANY_FACTS_FOR_WRITER, limit - len(chosen))
     chosen += company[:max(company_room, reserve)]
-    keep = {id(f) for f in chosen}
+    keep = {id(f) for f in chosen} | {id(f) for f in pinned}
     return [f for f in facts if id(f) in keep]
 
 
@@ -263,12 +277,21 @@ def fact_ids(facts: list[dict]) -> dict[str, dict]:
     return {f"F{i}": f for i, f in enumerate(facts, 1)}
 
 
-def _fact_line(fid: str, f: dict) -> str:
+def level_mismatch(f: dict, level: str | None) -> bool:
+    """An interview fact whose source describes a different seniority level than the candidate's."""
+    return bool(level) and f["section"] == "interview" and f.get("level") in LEVEL_PROCESS and f["level"] != level
+
+
+def _fact_line(fid: str, f: dict, level: str | None = None) -> str:
     tags = [f"source {f['source_id']}"]
     if f.get("stage"):
         tags.append(f"stage {f['stage']}")
-    if f["is_forum"]:
-        tags.append("FORUM")
+    if f.get("level") in LEVEL_PROCESS:
+        tags.append(f"level {f['level']}")
+    if level_mismatch(f, level):
+        tags.append(f"LEVEL-MISMATCH, label \"({LEVEL_PROCESS[f['level']]})\"")
+    if f.get("is_experience"):
+        tags.append("CANDIDATE-REPORT")
     if f.get("hedged"):
         tags.append("HEDGED")
     if f.get("published_date"):
@@ -286,22 +309,26 @@ def build_writer_prompt(company, role, level, facts: list[dict], sources: dict, 
     blocks = []
     for section in ("company", "interview", "role"):
         if section == "interview":  # grouped by stage, in interview order
-            lines = [_fact_line(fid, f) for stage in STAGE_ORDER for fid, f in by_id.items()
+            lines = [_fact_line(fid, f, level) for stage in STAGE_ORDER for fid, f in by_id.items()
                      if f["section"] == "interview" and f["stage"] == stage]
         else:
-            lines = [_fact_line(fid, f) for fid, f in by_id.items() if f["section"] == section]
+            lines = [_fact_line(fid, f, level) for fid, f in by_id.items() if f["section"] == section]
         blocks.append(f"### {section} facts\n" + ("\n".join(lines) if lines else "(none)"))
     stage_labels = ", ".join(f'"{STAGE_LABEL[s]}"' for s in STAGE_ORDER)
     s3 = SECTION3 if has_role_document(sources) else SECTION3_INFERRED
     label = LEVEL_LABEL[level]
-    if any(f["section"] == "interview" for f in facts):
+    n_interview = sum(f["section"] == "interview" for f in facts)
+    if n_interview >= MIN_INTERVIEW_FACTS:
         tldr_rule = ("exactly 3 bullets, ONLY from interview facts, no company news: 1) FORMAT: how the interview is "
                      "structured, from facts of ONE stage (the most informative one); 2) KEY TOPICS: what is asked, "
                      f"from facts of ONE stage; 3) STANDOUT INSIGHT: one surprising or useful fact a {label} candidate "
                      "should know. A bullet never mixes stages.")
+    elif n_interview:
+        tldr_rule = (f"there are only {n_interview} interview fact(s). The system adds a first bullet saying interview data is "
+                     "limited; do NOT write one. Write at most 2 bullets, ONLY from the interview facts, one stage per bullet.")
     else:
-        tldr_rule = (f'there are NO interview facts. First bullet exactly: "{NO_INTERVIEW}" Then at most 2 bullets '
-                     "from role facts about what the role needs. Never describe interview stages or format.")
+        tldr_rule = ("there are NO interview facts. The system adds the first bullets itself; do NOT write them. Write at most "
+                     "2 bullets from role facts about what the role needs. Never describe interview stages or format.")
     facts_text = "\n\n".join(blocks)
     user = f"""Today's date: {today.isoformat()}
 Company: {company}
@@ -321,13 +348,13 @@ Write the brief with these headings exactly, in this order:
 (group by stage: for each stage that has facts, in this order, write a bold label line, then one bullet per
 fact or per small group of facts from THAT stage only. Labels in order: {stage_labels}. Skip stages with no facts.)
 {s3}
-(role facts)
+(role facts; start with the "Posting location" fact if there is one)
 ## 4. How to prepare
-(4-6 numbered practice items, each derived from interview or role facts and citing them)
+(4-6 numbered practice items, each derived from ROLE or INTERVIEW facts and citing them; no company news)
 ## 5. Questions to ask the interviewer
 (3-5 numbered questions tailored to a {label} candidate about the team, the work, learning and growth, and the
-role, each citing a role or confirmed company fact. NEVER ask about interview logistics (rounds, scheduling,
-timeline, next steps), rumors, or unconfirmed/HEDGED news.)"""
+role, each citing a ROLE or INTERVIEW fact; no company news. NEVER ask about interview logistics (rounds,
+scheduling, timeline, next steps), rumors, or unconfirmed/HEDGED news.)"""
     return SYSTEM_PROMPT, user
 
 
@@ -366,7 +393,33 @@ def normalize_citations(body: str, n_facts: int) -> str:
 
 
 CITE_RE = re.compile(r"\[(F\d+)\]")
-SENT_RE = re.compile(r".+?(?:[.!?](?:\s*\[F\d+\])*(?=\s|$)|$)")  # sentence + its trailing citations
+BOUNDARY_RE = re.compile(r"([.!?])((?:\s*\[F\d+\])*)(?=\s|$)")  # a sentence end, plus its trailing citations
+# Words whose trailing "." does not end a sentence. Dotted forms (B.Tech, M.S., e.g., U.S., Ph.D.) are matched by pattern.
+ABBREVIATIONS = {"inc", "corp", "co", "ltd", "llc", "plc", "vs", "mr", "mrs", "ms", "dr", "prof", "sr", "jr", "st",
+                 "approx", "dept", "est", "fig", "no", "e.g", "i.e", "u.s", "u.k", "a.m", "p.m", "cf", "resp"}
+DOTTED_RE = re.compile(r"(?:[A-Za-z]{1,3}\.)+[A-Za-z]{1,3}")  # M.S  e.g  U.S  Ph.D  B.Tech
+
+
+def _is_abbreviation_dot(text: str, dot: int, end: int) -> bool:
+    """Is the '.' at text[dot] part of an abbreviation rather than a sentence end?"""
+    m = re.search(r"(\S+)$", text[:dot])
+    token = (m.group(1) if m else "").lstrip("(\"'*[")
+    if token.lower() in ABBREVIATIONS or DOTTED_RE.fullmatch(token) or re.fullmatch(r"[A-Z]", token):
+        return True  # "Inc.", "M.S.", "e.g.", or an initial like "J."
+    nxt = text[end:].lstrip()
+    return bool(nxt) and nxt[0].islower()  # a new sentence doesn't start in lowercase
+
+
+def split_sentences(text: str) -> list[str]:
+    """Split on . ! ? (with any trailing [F1] citations kept), but not inside abbreviations like B.Tech, M.S., e.g., U.S., Inc."""
+    out, start = [], 0
+    for m in BOUNDARY_RE.finditer(text):
+        if m.group(1) == "." and not m.group(2) and _is_abbreviation_dot(text, m.start(), m.end()):
+            continue
+        out.append(text[start:m.end()])
+        start = m.end()
+    out.append(text[start:])
+    return [x.strip() for x in out if x.strip()]
 LINE_PREFIX_RE = re.compile(r"^(\s*(?:[*\-]|\d+\.)\s+)?(.*)$", re.S)
 NUMBERED_RE = re.compile(r"^(\s*)\d+\.(\s+)")
 REPORTED_RE = re.compile(r"\(reported [^)]*\)", re.I)
@@ -378,6 +431,16 @@ LOGISTICS_RE = re.compile(r"\b(interviews?|rounds?|schedul\w*|timeline|next step
 def fact_sentence(fid: str, f: dict) -> str:
     """A fact as its own cited sentence."""
     return f"{f['fact'].rstrip('. ')} [{fid}]."
+
+
+LEVEL_LABEL_RE = re.compile(r"\((?:internship|intern|new[- ]grad|full-time|other-level)[^)]*\)", re.I)
+
+
+def add_level_label(sentence: str, label: str) -> str:
+    """'... 4 rounds [F3].' -> '... 4 rounds (full-time process) [F3].' (label goes before the citations)."""
+    m = re.match(r"^(.*?)([.!?]*)((?:\s*\[F\d+\])*)([.!?]*)\s*$", sentence, re.S)
+    body, p1, cites, p2 = m.groups()
+    return f"{body} ({label}){p1}{cites}{p2}"
 
 
 def attribute_to_candidates(sentence: str) -> str:
@@ -404,7 +467,7 @@ def _parse(body: str) -> list[dict]:
             lines.append({"raw": raw})
             continue
         m = LINE_PREFIX_RE.match(raw)
-        sents = [x.strip() for x in SENT_RE.findall(m.group(2)) if x.strip()]
+        sents = split_sentences(m.group(2))
         lines.append({"prefix": m.group(1) or "", "sents": sents, "section": section})
     return lines
 
@@ -412,7 +475,7 @@ def _parse(body: str) -> list[dict]:
 INTERVIEW_WORDS_RE = re.compile(r"interview|\brounds?\b|\bstages?\b|screen|onsite|on-site|assessment|\bOA\b|\bloop\b", re.I)
 
 
-def check_body(body: str, facts: list[dict], stats: RunStats, sources: dict | None = None) -> str:
+def check_body(body: str, facts: list[dict], stats: RunStats, sources: dict | None = None, level: str | None = None) -> str:
     """Drop sentences that cite no real fact, add numbers, or overclaim; rewrite unattributed forum facts;
     cap the company section; make sure all six sections exist, in order; renumber lists."""
     by_id = fact_ids(facts)
@@ -434,8 +497,7 @@ def check_body(body: str, facts: list[dict], stats: RunStats, sources: dict | No
             nonlocal company_sentences
             cited = CITE_RE.findall(sent)
             valid = [i for i in cited if i in by_id]
-            if is_questions and (LOGISTICS_RE.search(CITE_RE.sub("", sent)) or any(
-                    by_id[i]["section"] == "interview" or by_id[i].get("hedged") for i in valid)):
+            if is_questions and (LOGISTICS_RE.search(CITE_RE.sub("", sent)) or any(by_id[i].get("hedged") for i in valid)):
                 stats.drops.append(Drop(section, sent, "question-logistics-or-rumor"))
                 return
             if not cited:
@@ -454,6 +516,9 @@ def check_body(body: str, facts: list[dict], stats: RunStats, sources: dict | No
             if missing:
                 stats.drops.append(Drop(section, sent, "number-not-in-facts", ", ".join(missing)))
                 return
+            if derived and any(by_id[i]["section"] == "company" for i in valid):
+                stats.drops.append(Drop(section, sent, "derived-cites-company-news"))
+                return
             if is_tldr and INTERVIEW_WORDS_RE.search(CITE_RE.sub("", sent)) and not any(
                     by_id[i]["section"] == "interview" for i in valid):
                 stats.drops.append(Drop(section, sent, "tldr-interview-without-interview-fact"))
@@ -467,9 +532,15 @@ def check_body(body: str, facts: list[dict], stats: RunStats, sources: dict | No
                 new = add_hedge(sent)
                 stats.rewrites.append(Rewrite(section, sent, new, "hedge-added"))
                 sent = new
-            if not derived and all(by_id[i]["is_forum"] for i in valid) and not ATTRIBUTED_RE.search(sent):
+            if not derived and all(by_id[i].get("is_experience") for i in valid) and not ATTRIBUTED_RE.search(sent):
                 new = attribute_to_candidates(sent)
                 stats.rewrites.append(Rewrite(section, sent, new, "candidates-report"))
+                sent = new
+            wrong_level = sorted({by_id[i]["level"] for i in valid if level_mismatch(by_id[i], level)})
+            if wrong_level and not LEVEL_LABEL_RE.search(sent):
+                label = LEVEL_PROCESS[wrong_level[0]] if len(wrong_level) == 1 else "other-level processes"
+                new = add_level_label(sent, label)
+                stats.rewrites.append(Rewrite(section, sent, new, "level-label"))
                 sent = new
             kept.append(sent)
 
@@ -504,8 +575,14 @@ def check_body(body: str, facts: list[dict], stats: RunStats, sources: dict | No
                 prefix = NUMBERED_RE.sub(lambda m: f"{m.group(1)}{counter}.{m.group(2)}", prefix)
             out.append(prefix + " ".join(line["sents"]))
     s3 = SECTION3 if sources is None or has_role_document(sources) else SECTION3_INFERRED
-    has_interview = any(f["section"] == "interview" for f in facts)
-    return ensure_sections("\n".join(out), s3, has_interview)
+    interview = [f for f in facts if f["section"] == "interview"]
+    location_line = None
+    for fid, f in by_id.items():  # the posting's location always shows in section 3
+        cited_in_s3 = any(f"[{fid}]" in sent for line in lines if line.get("section", "").startswith("3.") for sent in line.get("sents", []))
+        if f.get("pinned") and not cited_in_s3:
+            location_line = fact_sentence(fid, f)
+            break
+    return ensure_sections("\n".join(out), s3, len(interview), len({f["source_id"] for f in interview}), location_line)
 
 
 def _section_index(heading: str) -> int | None:
@@ -517,9 +594,15 @@ def _section_index(heading: str) -> int | None:
     return int(m.group(1)) if m and 1 <= int(m.group(1)) <= 5 else None
 
 
-def ensure_sections(body: str, s3_heading: str, has_interview_facts: bool) -> str:
+def _bare(line: str) -> str:
+    return re.sub(r"^\s*(?:[*\-]|\d+\.)\s+", "", line).strip()
+
+
+def ensure_sections(body: str, s3_heading: str, n_interview_facts: int, n_interview_sources: int,
+                    location_line: str | None = None) -> str:
     """Re-emit the six sections in order under their canonical headings. A missing or empty section
-    (e.g. the writer's output was cut off) gets a placeholder instead of disappearing."""
+    (e.g. the writer's output was cut off) gets a placeholder instead of disappearing. With fewer than
+    MIN_INTERVIEW_FACTS interview facts the TL;DR opens with a data warning; the posting's location opens section 3."""
     headings = ["## TL;DR", "## 1. Company overview + recent news", "## 2. Interview process + common questions",
                 s3_heading, "## 4. How to prepare", "## 5. Questions to ask the interviewer"]
     content = [""] * 6
@@ -528,8 +611,15 @@ def ensure_sections(body: str, s3_heading: str, has_interview_facts: bool) -> st
         idx = _section_index(parts[i])
         if idx is not None:
             content[idx] += parts[i + 1]
-    if not has_interview_facts and NO_INTERVIEW not in content[0]:
-        content[0] = f"\n- {NO_INTERVIEW}" + content[0]
+    if n_interview_facts < MIN_INTERVIEW_FACTS:
+        lead = [f"- Limited interview data ({n_interview_sources} source{'' if n_interview_sources == 1 else 's'})."]
+        if n_interview_facts == 0:
+            lead.append(f"- {NO_INTERVIEW}")
+        rest = [l for l in content[0].splitlines()
+                if l.strip() and not _bare(l).startswith("Limited interview data") and _bare(l) != NO_INTERVIEW]
+        content[0] = "\n".join(lead + rest)
+    if location_line:
+        content[3] = location_line + "\n" + content[3].replace(PLACEHOLDER, "").strip("\n")
     out = []
     for heading, text in zip(headings, content):
         text = text.strip("\n")
@@ -560,7 +650,7 @@ def render(body: str, facts: list[dict], sources: dict) -> tuple[str, list[dict]
 
 
 def finalize_brief(company, role, level, body: str, facts: list[dict], sources: dict, stats: RunStats) -> BriefResult:
-    body = check_body(body, facts, stats, sources)
+    body = check_body(body, facts, stats, sources, level)
     body, cited = render(body, facts, sources)
     lines = []
     for n, s in enumerate(cited, 1):
