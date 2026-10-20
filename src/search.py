@@ -18,7 +18,9 @@ POSTING_RESULTS = 10  # fetch more postings so there's a good chance one matches
 RECENT_DAYS = 365
 FULL_TEXT_COMPANY = 3  # company sources fetched in full; every interview/forum/posting source is fetched
 EXTRACT_BATCH = 20  # Tavily extract takes at most 20 URLs per call
-FULL_TEXT_CHARS = 6000  # cap per page (after cleaning) so each extraction prompt stays small
+FULL_TEXT_CHARS = 6000  # what one extraction prompt sees of a page, chosen by relevance (see focus_text)
+SHORT_BLOCK = 80  # blocks shorter than this (menu entries, headings) are weak evidence of content
+MAX_PAGE_CHARS = 80000  # how much of a cleaned page is kept before choosing the relevant part
 MIN_POSTING_CHARS = 500  # extracted posting text shorter than this is treated as a failed extract
 MAX_POSTING_TRIES = 3
 
@@ -72,6 +74,43 @@ def source_kind(url: str, company: str) -> str:
     return "other"
 
 
+JOB_AGGREGATORS = ("jobright.ai", "indeed.com", "linkedin.com", "ziprecruiter.com", "simplyhired.com", "lensa.com", "talent.com",
+                   "wellfound.com", "themuse.com", "builtin.com", "joinhandshake.com", "levels.fyi", "monster.com", "careerbuilder.com",
+                   "dice.com", "snagajob.com", "jooble.org", "adzuna.com", "glassdoor.com")
+ATS_HOSTS = ("greenhouse.io", "lever.co", "myworkdayjobs.com", "icims.com", "smartrecruiters.com", "ashbyhq.com", "workable.com", "taleo.net")
+JOB_PATH_RE = re.compile(r"/jobs?/|/job-|/careers?/(?:listing|apply|jobs?|openings?|positions?)\b|/listing/|/positions?/|/openings?/|/requisition", re.I)
+CAREERS_PATH_RE = re.compile(r"/careers?\b|/jobs\b|/university|/early-career|/students?|/campus|/graduates?|/internships?|/new-grads?|/early-talent", re.I)
+SOURCE_TYPES = ("official-posting", "company-site", "third-party-guide", "job-aggregator", "forum/blog", "news")
+TYPE_LABEL = {"official-posting": "official posting", "company-site": "company site", "third-party-guide": "third-party guide",
+              "job-aggregator": "job aggregator", "forum/blog": "forum/blog posts", "news": "news"}
+
+
+def _host_in(host: str, domains) -> bool:
+    return any(host == d or host.endswith("." + d) for d in domains)
+
+
+def source_type(url: str, company: str, group: str = "", published: str | None = None) -> str:
+    """What kind of source this is, for labelling facts: official-posting | company-site | third-party-guide |
+    job-aggregator | forum/blog | news. 'Official' means the company's own site (or its applicant-tracking system)."""
+    host, kind = _host(url), source_kind(url, company)
+    if kind in ("forum", "blog"):
+        return "forum/blog"
+    if _host_in(host, JOB_AGGREGATORS):
+        return "job-aggregator"
+    slug = _slug(company)
+    on_ats = _host_in(host, ATS_HOSTS) and slug and slug in re.sub(r"[^a-z0-9]", "", url.lower())
+    if kind == "company" or on_ats:
+        return "official-posting" if (group == "posting" or on_ats or JOB_PATH_RE.search(url)) else "company-site"
+    if kind == "reputable" or (published and group == "company"):
+        return "news"
+    return "third-party-guide"
+
+
+def is_careers_page(url: str, company: str, group: str = "") -> bool:
+    """A page on the company's own site about jobs/programs: top priority for the process and role sections."""
+    return source_kind(url, company) == "company" and (group in ("careers", "posting") or bool(CAREERS_PATH_RE.search(urlparse(url).path)))
+
+
 def _parse_date(raw: str | None) -> str | None:
     """Tavily gives RFC-2822 or ISO strings (news only). Normalise to YYYY-MM-DD."""
     if not raw:
@@ -114,6 +153,16 @@ def clean_page_text(text: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
+# Interview-query words by role family, so a product role isn't searched with coding terms only.
+FAMILY_INTERVIEW_TERMS = {
+    "software": "coding data structures system design",
+    "product": "product sense case interview APM interview product design",
+    "data": "SQL case study statistics",
+    "hardware": "circuit digital design",
+    "design": "portfolio design challenge",
+    "security": "threat modeling security",
+    "business": "case interview",
+}
 MIN_FAMILY_HITS = 2  # a snippet only counts as "about another family" with at least this many keyword hits
 
 # Role families, to keep a "Silicon/FPGA intern" post out of a software-engineering brief.
@@ -137,6 +186,12 @@ def role_family(role: str) -> str | None:
     """The role family the user asked for, or None if the role matches no known family (then we don't filter)."""
     scores = family_scores(role)
     return scores.most_common(1)[0][0] if scores else None
+
+
+def interview_terms(role: str) -> str:
+    """Extra interview-query words that fit the role's family ('' if the role matches none)."""
+    family = role_family(role)
+    return FAMILY_INTERVIEW_TERMS.get(family, "") if family else ""
 
 
 def mentions_company(result: dict, company: str) -> bool:
@@ -180,8 +235,74 @@ def filter_interview(results: list[dict], company: str, role: str) -> tuple[list
     return kept, filtered
 
 
+GENERIC_FOCUS = ("apply", "application", "eligib", "qualif", "requirement", "responsib", "interview", "round", "assessment",
+                 "program", "rotation", "deadline", "timeline", "mentor", "benefit", "experience", "skills", "degree", "location")
+LEVEL_FOCUS = {"intern": ("intern", "internship", "summer"), "new-grad": ("new grad", "graduate", "university", "early career", "campus"),
+               "experienced": ("senior", "years of experience")}
+
+
+def focus_keywords(company: str, role: str, level: str) -> list[str]:
+    """Words that mark the useful part of a page for this company/role/level (company name excluded: it's everywhere)."""
+    role_words = [w for w in re.findall(r"[a-z]+", role.lower()) if len(w) > 2]
+    return list(dict.fromkeys(role_words + list(LEVEL_FOCUS[level]) + list(GENERIC_FOCUS)))
+
+
+def focus_text(text: str, keywords: list[str] | None, limit: int = FULL_TEXT_CHARS) -> str:
+    """The `limit` characters of `text` most about `keywords`.
+
+    Career pages open with thousands of characters of menu ("Products / Sales / Service ...") and the real content
+    comes after; taking the head would hand the extractor only the menu. Blocks (blank-line separated) are scored by
+    keyword hits, long prose scores extra, and the best contiguous run of blocks that fits is returned.
+    """
+    if len(text) <= limit:
+        return text
+    if not keywords:
+        return text[:limit]
+    blocks = [b for b in re.split(r"\n\s*\n", text) if b.strip()]
+    pats = [re.compile(re.escape(k), re.I) for k in keywords]
+    hits = [min(sum(len(p.findall(b)) for p in pats), 12) for b in blocks]
+    # Menu items and headings are short; real content is prose. Short blocks score nothing, however many keywords they
+    # contain ("Products", "Product Manager" in a menu) and however many there are; long ones score their hits plus a
+    # prose bonus. (Headings next to good prose still come along, because the window is contiguous.)
+    scores = [0.0 if len(b) < SHORT_BLOCK else h + (1.5 if len(b) >= 150 else 0) for h, b in zip(hits, blocks)]
+    sizes = [len(b) + 2 for b in blocks]
+    best, best_range, lo, window, total = 0.0, None, 0, 0, 0.0
+    for hi in range(len(blocks)):  # the contiguous run of blocks, within `limit`, with the highest total score
+        window += sizes[hi]
+        total += scores[hi]
+        while window > limit and lo < hi:
+            window -= sizes[lo]
+            total -= scores[lo]
+            lo += 1
+        if total > best:
+            best, best_range = total, (lo, hi + 1)
+    if best_range is None:  # nothing on the page looks like content: keep the head
+        return text[:limit]
+    first = next(i for i in range(*best_range) if scores[i] > 0)  # shrink to the scoring core...
+    last = max(i for i in range(*best_range) if scores[i] > 0) + 1
+    size = sum(sizes[first:last])
+    while True:  # ...then grow it with the neighbouring headings / closing lines while there is room
+        grew = False
+        if first > 0 and size + sizes[first - 1] <= limit:
+            first -= 1
+            size += sizes[first]
+            grew = True
+        if last < len(blocks) and size + sizes[last] <= limit:
+            size += sizes[last]
+            last += 1
+            grew = True
+        if not grew:
+            break
+    while first < last - 1 and hits[first] <= 1 and len(blocks[first]) < 200:  # drop menu leftovers at the edges
+        first += 1
+    while last - 1 > first and hits[last - 1] <= 1 and len(blocks[last - 1]) < 200:
+        last -= 1
+    return "\n\n".join(blocks[first:last])[:limit]
+
+
 def extract(urls: list[str], client: TavilyClient | None = None) -> dict[str, str]:
-    """Fetch full page text for `urls` via Tavily extract. Returns {url: text}; failures are reported, not hidden."""
+    """Fetch page text for `urls` via Tavily extract (cleaned, whole page up to MAX_PAGE_CHARS; callers pick the
+    relevant part with focus_text). Returns {url: text}; failures are reported, not hidden."""
     blocked = [u for u in urls if is_blocked(u)]
     if blocked:
         print(f"[search] refusing to extract {len(blocked)} blocked page(s): {', '.join(blocked)}", file=sys.stderr)
@@ -201,13 +322,18 @@ def extract(urls: list[str], client: TavilyClient | None = None) -> dict[str, st
             print(f"[search] could not extract {failed.get('url')}; skipped", file=sys.stderr)
         for r in response.get("results", []):
             if r.get("raw_content"):
-                texts[r["url"]] = clean_page_text(r["raw_content"])[:FULL_TEXT_CHARS]
+                texts[r["url"]] = clean_page_text(r["raw_content"])[:MAX_PAGE_CHARS]
     return texts
 
 
-def fetch_full_text(sources: dict[str, dict]) -> tuple[int, int]:
-    """Attach `full_text` (in place) to every interview/forum/posting source and the top company sources.
+def _fit(text: str, focus: list[str] | None) -> str:
+    return focus_text(text, focus) if focus else text[:FULL_TEXT_CHARS]
 
+
+def fetch_full_text(sources: dict[str, dict], focus: list[str] | None = None) -> tuple[int, int]:
+    """Attach `full_text` (in place) to every careers/interview/forum/posting source and the top company sources.
+
+    `focus` (see focus_keywords) picks the relevant FULL_TEXT_CHARS of long pages; without it the page head is used.
     Returns (fetched, failed). Sources that already have text (the posting, a JD) are left alone.
     """
     company_ids = [sid for sid, s in sources.items() if s.get("group") == "company"][:FULL_TEXT_COMPANY]
@@ -220,7 +346,7 @@ def fetch_full_text(sources: dict[str, dict]) -> tuple[int, int]:
     for sid in wanted:
         sources[sid]["fetch_attempted"] = True
         if sources[sid]["url"] in texts:
-            sources[sid]["full_text"] = texts[sources[sid]["url"]]
+            sources[sid]["full_text"] = _fit(texts[sources[sid]["url"]], focus)
     fetched = sum(sources[sid]["url"] in texts for sid in wanted)
     return fetched, len(wanted) - fetched
 
@@ -296,7 +422,7 @@ def normalize_posting_url(url: str) -> str:
     return url
 
 
-def resolve_posting(candidates: list[dict], location: str | None = None) -> list[dict]:
+def resolve_posting(candidates: list[dict], location: str | None = None, focus: list[str] | None = None) -> list[dict]:
     """Return one posting with full text. Try the best candidates in order; fall back to the best snippet.
 
     With a location, a fetched page that really is in it wins immediately; otherwise the next candidate is
@@ -305,7 +431,7 @@ def resolve_posting(candidates: list[dict], location: str | None = None) -> list
     found: list[tuple[int, int, dict]] = []  # (location rank, order, posting)
     for order, cand in enumerate(candidates[:MAX_POSTING_TRIES]):
         url = normalize_posting_url(cand["url"])
-        text = extract([url]).get(url, "")
+        text = _fit(extract([url]).get(url, ""), focus)
         if len(text.strip()) < MIN_POSTING_CHARS:
             print(f"[search] posting text from {url} missing or under {MIN_POSTING_CHARS} chars; trying next result", file=sys.stderr)
             continue
@@ -335,6 +461,8 @@ def gather_research(company: str, role: str, level: str, jd: str | None, today: 
     today = today or date.today()
     terms = LEVEL_QUERY_TERMS[level]
 
+    family_terms = interview_terms(role)
+
     company_results = (
         search(f"{company} company overview", exclude_domains=EXCLUDE_DOMAINS)
         + search(
@@ -342,12 +470,16 @@ def gather_research(company: str, role: str, level: str, jd: str | None, today: 
             topic="news", time_range="year", exclude_domains=EXCLUDE_DOMAINS,
         )
     )
+    # The company's own careers/program pages: top-priority sources for the process and role sections.
+    careers_results = [r for r in search(f"{company} careers {terms} {role} program how to apply", exclude_domains=EXCLUDE_DOMAINS)
+                       if source_kind(r["url"], company) == "company"]
     interview_results = (
-        search(f"site:reddit.com {company} {role} {terms} interview process questions")
-        + search(f"{company} {role} {terms} interview process common questions", exclude_domains=EXCLUDE_DOMAINS)
+        search(f"site:reddit.com {company} {role} {terms} {family_terms} interview process questions")
+        + search(f"{company} {role} {terms} {family_terms} interview process common questions", exclude_domains=EXCLUDE_DOMAINS)
     )
     interview_kept, interview_filtered = filter_interview(_dedupe(interview_results), company, role)
     research = {
+        "careers": _dedupe(careers_results),  # first, so a page found twice is filed here, not under company news
         "company": rank(drop_stale(_dedupe(company_results), today), company),
         "interview": rank(interview_kept, company),
         "posting": [],
@@ -355,7 +487,8 @@ def gather_research(company: str, role: str, level: str, jd: str | None, today: 
     }
     if not jd:
         postings = search(f"{company} {role} {terms} job posting {location}", max_results=POSTING_RESULTS)
-        research["posting"] = resolve_posting(rank_postings(postings, company, role, level, location), location)
+        research["posting"] = resolve_posting(rank_postings(postings, company, role, level, location), location,
+                                              focus_keywords(company, role, level))
     return research
 
 
@@ -368,9 +501,9 @@ def search_more(company: str, role: str, level: str, section: str, known_urls: s
     terms = LEVEL_QUERY_TERMS[level]
     if section == "interview":
         results = (
-            search(f"site:reddit.com {company} {role} {terms} interview experience rounds")
+            search(f"site:reddit.com {company} {role} {terms} {interview_terms(role)} interview experience rounds")
             + search(f"site:leetcode.com {company} {role} interview experience")
-            + search(f"{company} {role} {terms} interview questions what to expect", exclude_domains=EXCLUDE_DOMAINS)
+            + search(f"{company} {role} {terms} {interview_terms(role)} interview questions what to expect", exclude_domains=EXCLUDE_DOMAINS)
         )
         results, filtered = filter_interview(_dedupe(results), company, role)
         if filtered_out is not None:

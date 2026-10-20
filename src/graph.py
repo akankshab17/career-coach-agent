@@ -20,7 +20,7 @@ from brief import (
 )
 from facts import extract_facts, ground, location_fact, source_text
 from location import DEFAULT_LOCATION
-from search import fetch_full_text, gather_research, search_more
+from search import fetch_full_text, focus_keywords, gather_research, search_more
 
 MIN_FACTS = 2  # a key section with fewer grounded facts triggers one follow-up search
 
@@ -83,7 +83,7 @@ def search_node(state: BriefState) -> dict:
 
 def fetch_node(state: BriefState) -> dict:
     stats, sources = state["stats"], state["sources"]
-    fetched, failed = fetch_full_text(sources)
+    fetched, failed = fetch_full_text(sources, focus=focus_keywords(state["company"], state["role"], state["level"]))
     stats.sources_with_text = sum(1 for s in sources.values() if s.get("full_text"))
     _log(stats, f"[fetch] {fetched} pages fetched, {failed} failed; {stats.sources_with_text}/{len(sources)} sources have full text")
     return {"sources": sources}

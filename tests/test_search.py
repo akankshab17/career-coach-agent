@@ -1,6 +1,7 @@
 from datetime import date
 
 import helpers
+import pytest
 import search
 from brief import collect_sources
 from helpers import res
@@ -273,3 +274,139 @@ def test_extract_never_sends_glassdoor_urls(capsys):
 def test_blocked_urls_never_become_sources():
     sources = collect_sources({"interview": [res(1, url="https://www.glassdoor.com/Interview/x.htm"), res(2)], "filtered": [{"url": "u"}]}, "Acme")
     assert [s["url"] for s in sources.values()] == ["https://example.com/2"]
+
+
+# ---- source types ----
+
+@pytest.mark.parametrize("url, group, published, expected", [
+    ("https://stripe.com/careers/listing/software-engineer-new-grad/8128744", "posting", None, "official-posting"),
+    ("https://boards.greenhouse.io/stripe/jobs/123", "posting", None, "official-posting"),
+    ("https://jobs.lever.co/stripe/abc", "role", None, "official-posting"),
+    ("https://www.stripe.com/jobs/search?q=swe", "role", None, "official-posting"),
+    ("https://www.stripe.com/company/careers/university/new-grads", "careers", None, "company-site"),
+    ("https://stripe.com/newsroom/news/q4-results", "company", "2026-02-01", "company-site"),
+    ("https://jobright.ai/jobs/early-career-apm", "posting", None, "job-aggregator"),
+    ("https://www.themuse.com/jobs/stripe/swe", "posting", None, "job-aggregator"),
+    ("https://www.linkedin.com/jobs/view/1", "role", None, "job-aggregator"),
+    ("https://www.reddit.com/r/cs/1", "interview", None, "forum/blog"),
+    ("https://medium.com/@x/my-stripe-interview", "interview", None, "forum/blog"),
+    ("https://leetcode.com/discuss/post/1/stripe", "interview", None, "forum/blog"),
+    ("https://www.reuters.com/tech/stripe-1", "company", "2026-02-01", "news"),
+    ("https://some-outlet.example.com/stripe-deal", "company", "2026-02-01", "news"),
+    ("https://www.joinleland.com/library/a/stripe-apm", "interview", None, "third-party-guide"),
+    ("https://igotanoffer.com/blogs/tech/stripe-interview", "interview", None, "third-party-guide"),
+])
+def test_source_types(url, group, published, expected):
+    assert search.source_type(url, "Stripe", group, published) == expected
+
+
+def test_careers_pages_are_recognised_on_the_company_site_only():
+    assert search.is_careers_page("https://www.salesforce.com/company/careers/university/new-grads", "Salesforce")
+    assert search.is_careers_page("https://www.salesforce.com/anything", "Salesforce", group="careers")
+    assert not search.is_careers_page("https://www.salesforce.com/news/stories/fy26-q4-highlights", "Salesforce")
+    assert not search.is_careers_page("https://www.joinleland.com/careers/salesforce", "Salesforce")
+
+
+# ---- choosing the useful part of a page ----
+
+MENU = "".join(f"## Product {n}\n\nShort blurb about product {n}.\n\n" for n in range(300))  # ~12k chars of site menu
+CONTENT = (
+    "# New graduate jobs at Acme.\n\nLooking to launch your career at Acme? You are in the right place.\n\n"
+    "## Associate Product Manager Program\n\nThis two-year rotational program for new graduates gives you ownership of "
+    "products, mentorship from senior leaders, and exposure to the APM community. Eligibility: a degree by 2027.\n\n"
+    "## What you will do\n\nYou will own a defined area of a product, run customer discovery interviews, partner with engineers "
+    "and designers, and present your product strategy to senior leaders every quarter during the program.\n\n"
+    "## Ready to apply?\n\nApplications open in early July. Submit your application promptly."
+)
+KEYWORDS = search.focus_keywords("Acme", "Associate Product Manager", "new-grad")
+
+
+def test_focus_text_finds_the_content_after_a_long_menu():
+    page = MENU + CONTENT
+    assert page.find("New graduate jobs") > search.FULL_TEXT_CHARS  # the old head-cap would have kept only the menu
+    focused = search.focus_text(page, KEYWORDS)
+    assert len(focused) <= search.FULL_TEXT_CHARS
+    assert focused.startswith("# New graduate jobs at Acme.") and focused.endswith("Submit your application promptly.")
+    assert "Product 7" not in focused
+
+
+def test_focus_text_keeps_content_that_comes_first_and_short_pages_whole():
+    page = CONTENT + "\n\n" + MENU
+    focused = search.focus_text(page, KEYWORDS)
+    assert focused.startswith("# New graduate jobs at Acme.") and "Applications open in early July" in focused
+    assert search.focus_text(CONTENT, KEYWORDS) == CONTENT  # fits: untouched
+    assert search.focus_text(MENU + CONTENT, None) == (MENU + CONTENT)[:search.FULL_TEXT_CHARS]  # no keywords: the head
+
+
+def test_focus_keywords_use_the_role_level_and_generic_words_but_not_the_company():
+    kw = search.focus_keywords("Acme", "Associate Product Manager", "new-grad")
+    assert {"associate", "product", "manager", "new grad", "graduate", "apply", "interview"} <= set(kw)
+    assert "acme" not in kw
+    assert "intern" in search.focus_keywords("Acme", "SWE", "intern")
+
+
+def test_extract_returns_the_whole_cleaned_page_and_fetch_focuses_it(monkeypatch):
+    class Client:
+        def extract(self, urls):
+            return {"results": [{"url": urls[0], "raw_content": MENU + CONTENT}]}
+
+    text = search.extract(["https://acme.com/careers/new-grads"], client=Client())["https://acme.com/careers/new-grads"]
+    assert len(text) > search.FULL_TEXT_CHARS and "Applications open in early July" in text
+
+    monkeypatch.setattr(search, "extract", lambda urls, client=None: {u: text for u in urls})
+    sources = collect_sources({"careers": [res(1, url="https://acme.com/careers/new-grads")]}, "Acme")
+    search.fetch_full_text(sources, focus=KEYWORDS)
+    got = sources["S1"]["full_text"]
+    assert len(got) <= search.FULL_TEXT_CHARS and got.startswith("# New graduate jobs at Acme.")
+
+    sources = collect_sources({"careers": [res(1, url="https://acme.com/careers/new-grads")]}, "Acme")
+    search.fetch_full_text(sources)  # without a focus: the head, as before
+    assert "New graduate jobs" not in sources["S1"]["full_text"]
+
+
+def test_resolve_posting_focuses_long_pages_too(monkeypatch):
+    monkeypatch.setattr(search, "extract", lambda urls, client=None: {u: MENU + CONTENT for u in urls})
+    out = search.resolve_posting([res(1, url="https://acme.com/careers/apm")], "United States", KEYWORDS)
+    assert out[0]["full_text"].startswith("# New graduate jobs at Acme.")
+
+
+# ---- interview queries fit the role family ----
+
+@pytest.mark.parametrize("role, expected, absent", [
+    ("Associate Product Manager", ["product sense", "APM interview", "case interview"], ["SQL"]),
+    ("Data Scientist", ["SQL", "case study"], ["product sense"]),
+    ("Software Engineer", ["coding"], ["product sense", "SQL"]),
+    ("Barista", [], ["product sense", "SQL", "coding"]),
+])
+def test_interview_queries_use_terms_for_the_role_family(monkeypatch, role, expected, absent):
+    queries = []
+    monkeypatch.setattr(search, "search", lambda q, client=None, **kw: queries.append(q) or [])
+    search.gather_research("Acme", role, "new-grad", "a jd")
+    interview_queries = [q for q in queries if "interview" in q]
+    assert interview_queries
+    for term in expected:
+        assert all(term in q for q in interview_queries), (term, interview_queries)
+    for term in absent:
+        assert not any(term in q for q in interview_queries)
+
+    queries.clear()
+    search.search_more("Acme", role, "new-grad", "interview", set())
+    for term in expected:
+        assert any(term in q for q in queries)
+
+
+def test_company_careers_pages_are_searched_and_kept_only_if_on_the_company_site(monkeypatch):
+    seen = {}
+
+    def fake_search(q, client=None, **kw):
+        seen[q] = True
+        if "careers" in q and "program" in q:
+            return [res(1, "New grads", "https://www.acme.com/company/careers/university/new-grads"),
+                    res(2, "Best APM programs", "https://www.aakashg.com/apm-programs"),
+                    res(3, "Acme APM", "https://www.reddit.com/r/apm/1")]
+        return []
+
+    monkeypatch.setattr(search, "search", fake_search)
+    research = search.gather_research("Acme", "Associate Product Manager", "new-grad", "a jd")
+    assert [r["url"] for r in research["careers"]] == ["https://www.acme.com/company/careers/university/new-grads"]
+    assert list(research)[0] == "careers"  # first, so a page found twice is filed under careers, not company news

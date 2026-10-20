@@ -222,7 +222,7 @@ def test_extraction_uses_the_extract_task_and_model_is_part_of_the_cache_key(mon
     monkeypatch.setenv("EXTRACT_MODEL", "openai/gpt-oss-120b")  # different model: its own entry, same prompt version
     _, cached = facts.extract_facts(src, "Stripe", "SWE", "new-grad")
     assert cached is False and len(calls) == 2
-    assert facts.PROMPT_VERSION == "extract-v3"  # a model change doesn't bump the prompt version
+    assert facts.PROMPT_VERSION == "extract-v4"  # a model change doesn't bump the prompt version
 
     monkeypatch.delenv("EXTRACT_MODEL")  # back to the default model: first entry is still there
     _, cached = facts.extract_facts(src, "Stripe", "SWE", "new-grad")
@@ -281,7 +281,7 @@ def test_extraction_prompt_asks_for_level_and_subject():
     assert '"level": "intern|new-grad|experienced|unknown"' in facts.EXTRACT_SYSTEM_PROMPT
     assert "about_company" in facts.EXTRACT_SYSTEM_PROMPT and "website or service that published the page" in facts.EXTRACT_SYSTEM_PROMPT
     assert "is_forum" not in facts.EXTRACT_SYSTEM_PROMPT
-    assert facts.PROMPT_VERSION == "extract-v3"
+    assert facts.PROMPT_VERSION == "extract-v4"
 
 
 # ---- level tag ----
@@ -334,3 +334,58 @@ def test_bare_money_amounts_and_headcounts_need_a_dated_source(fact_text):
 ])
 def test_ordinary_numbers_are_not_time_sensitive(fact_text):
     assert not facts.TIME_SENSITIVE_RE.search(fact_text)
+
+
+def test_reasoning_effort_is_not_part_of_the_cache_key(monkeypatch):
+    calls = _counting_llm(monkeypatch)
+    src = sources()["S1"]
+    facts.extract_facts(src, "Stripe", "SWE", "new-grad")
+    monkeypatch.setenv("EXTRACT_REASONING_EFFORT", "high")
+    _, cached = facts.extract_facts(src, "Stripe", "SWE", "new-grad")
+    assert cached is True and len(calls) == 1 and len(os.listdir(facts.CACHE_DIR)) == 1
+    monkeypatch.setenv("WRITE_REASONING_EFFORT", "low")
+    assert facts.extract_facts(src, "Stripe", "SWE", "new-grad")[1] is True
+
+
+# ---- the cache follows the text the extractor read ----
+
+def test_cache_entry_is_not_reused_when_the_page_text_changes(monkeypatch):
+    """The Salesforce bug: the extractor read only a site menu and returned []; that empty result stuck in the cache."""
+    outputs = iter(['{"facts": []}', '{"facts": [{"fact": "f", "exact_quote": "q one two", "section": "role"}]}'])
+    calls = []
+    monkeypatch.setattr(llm, "generate", lambda s, u, task="write": calls.append(1) or next(outputs))
+    url = "https://www.example.com/careers/new-grads"
+    menu_only = {"url": url, "full_text": "Products Sales Service Pricing " * 20}
+    content = {"url": url, "full_text": "New graduate jobs: a two-year rotational program. " * 20}
+
+    assert facts.extract_facts(menu_only, "Acme", "APM", "new-grad") == ([], False)
+    assert facts.extract_facts(menu_only, "Acme", "APM", "new-grad") == ([], True)  # same text: cached
+    got, cached = facts.extract_facts(content, "Acme", "APM", "new-grad")  # new text: asked again
+    assert cached is False and len(calls) == 2 and got[0]["fact"] == "f"
+
+
+# ---- timeline ----
+
+def test_timeline_is_a_fact_section_and_the_extractor_is_told_what_it_is():
+    assert "timeline" in facts.SECTIONS
+    assert '"section": "company|interview|role|timeline"' in facts.EXTRACT_SYSTEM_PROMPT
+    assert "Dates and deadlines are \"timeline\", never \"interview\"" in facts.EXTRACT_SYSTEM_PROMPT
+    assert "career and program pages" in facts.EXTRACT_SYSTEM_PROMPT
+
+
+def test_timeline_facts_are_grounded_without_stage_or_level():
+    page = "Applications open in early July. Deadlines close within 2-4 weeks. The loop has 4 rounds."
+    c = {**cand("Applications open in early July.", "Applications open in early July", "timeline"), "stage": "onsite", "level": "intern"}
+    grounded, _ = facts.ground([c], sources(text=page))
+    assert grounded[0]["section"] == "timeline" and grounded[0]["stage"] == "" and grounded[0]["level"] == ""
+    assert grounded[0]["is_experience"] is False
+
+
+def test_grounded_facts_carry_their_source_type_and_whether_it_is_official():
+    src = sources(text="You will build APIs for merchants every day.")
+    src["S1"].update({"type": "official-posting", "official": True})
+    grounded, _ = facts.ground([cand("You will build APIs.", "You will build APIs for merchants", "role")], src)
+    assert grounded[0]["source_type"] == "official-posting" and grounded[0]["official"] is True
+    plain, _ = facts.ground([cand("You will build APIs.", "You will build APIs for merchants", "role")],
+                            sources(text="You will build APIs for merchants every day."))
+    assert plain[0]["source_type"] == "" and plain[0]["official"] is False

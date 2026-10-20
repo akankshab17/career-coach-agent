@@ -13,9 +13,9 @@ from urllib.parse import urlparse
 
 import llm
 
-PROMPT_VERSION = "extract-v3"  # bump when EXTRACT_SYSTEM_PROMPT changes, so old cache entries are ignored
+PROMPT_VERSION = "extract-v4"  # bump when EXTRACT_SYSTEM_PROMPT changes, so old cache entries are ignored
 CACHE_DIR = os.path.join(".cache", "extract")
-SECTIONS = ("company", "interview", "role")
+SECTIONS = ("company", "interview", "role", "timeline")
 STAGES = ("oa", "phone-screen", "team-screen", "onsite", "unknown")
 LEVELS = ("intern", "new-grad", "experienced", "unknown")
 EXPERIENCE_KINDS = ("forum", "blog")  # first-person accounts live here: Reddit, LeetCode discuss, Medium and other blogs
@@ -55,14 +55,18 @@ REJECT_REASONS = {
 
 EXTRACT_SYSTEM_PROMPT = f"""You extract facts for a student's interview-prep brief from ONE web page.
 Return JSON only, no prose:
-{{"facts": [{{"fact": "...", "exact_quote": "...", "section": "company|interview|role", "stage": "oa|phone-screen|team-screen|onsite|unknown", "level": "intern|new-grad|experienced|unknown", "about_company": true|false}}]}}
+{{"facts": [{{"fact": "...", "exact_quote": "...", "section": "company|interview|role|timeline", "stage": "oa|phone-screen|team-screen|onsite|unknown", "level": "intern|new-grad|experienced|unknown", "about_company": true|false}}]}}
 Rules:
 - exact_quote: copied VERBATIM from the page text, one contiguous span of about 5-40 words that states the fact.
   Do not fix typos, reorder, or join separate passages.
 - fact: one short sentence restating ONLY what the quote says. No added numbers, names, durations or details.
 - section: "company" = what the company does, products, news, acquisitions, funding;
   "interview" = interview stages, formats, durations, question types, tips;
-  "role" = responsibilities, qualifications, skills, team, location of the role.
+  "role" = responsibilities, qualifications, skills, program description, team, location of the role;
+  "timeline" = the APPLICATION calendar: when applications open or close, deadlines, decision dates, start dates,
+  how long the process takes. Dates and deadlines are "timeline", never "interview".
+- Company career and program pages (the company's own site) are the best source for "role" and "interview" facts:
+  extract what the page says about the program, eligibility, qualifications, how to apply and the process.
 - stage (interview facts only; use "unknown" otherwise): which interview stage the fact is about.
   "oa" = online assessment / OA / take-home test; "phone-screen" = recruiter or technical phone/video screen;
   "team-screen" = team/hiring-manager conversation; "onsite" = onsite / virtual onsite / final loop.
@@ -94,14 +98,14 @@ def source_text(source: dict) -> tuple[str, str]:
 
 # ---------- extraction (LLM) + cache ----------
 
-def _cache_path(url: str, company: str, role: str, level: str, text_kind: str, model: str,
-                text_for_key: str | None = None) -> str:
-    # Key: URL + prompt version + the model that extracted. Company/role/level are in the prompt too, and text_kind
-    # keeps snippet-based and full-page extractions of the same URL apart. A different model = a different entry,
-    # so switching models never serves another model's facts; the prompt version changes only when the prompt does.
-    key = "|".join([PROMPT_VERSION, model, url, company.lower(), role.lower(), level, text_kind])
-    if text_for_key is not None:  # a pasted JD has no real URL: key on its text instead
-        key += "|" + hashlib.sha256(text_for_key.encode()).hexdigest()
+def _cache_path(url: str, company: str, role: str, level: str, text_kind: str, model: str, text: str) -> str:
+    # Key: URL + prompt version + the model that extracted + a hash of the exact text it read. Company/role/level
+    # are in the prompt too, and text_kind keeps snippet and full-page extractions apart. A different model = a
+    # different entry; the prompt version changes only when the prompt does. The text hash means that when the
+    # text we feed the extractor changes (better page cleaning, a different part of the page), old results
+    # (even an empty list from reading a menu) are not reused. A pasted JD is keyed on its text for the same reason.
+    key = "|".join([PROMPT_VERSION, model, url, company.lower(), role.lower(), level, text_kind,
+                    hashlib.sha256(text.encode()).hexdigest()])
     return os.path.join(CACHE_DIR, hashlib.sha256(key.encode()).hexdigest()[:32] + ".json")
 
 
@@ -117,10 +121,9 @@ def parse_facts(output: str) -> list[dict]:
 def extract_facts(source: dict, company: str, role: str, level: str, use_cache: bool = True) -> tuple[list[dict], bool]:
     """LLM-extract candidate facts from one source's text (full page or snippet). Returns (facts, came_from_cache)."""
     text, text_kind = source_text(source)
-    is_jd = source["url"].startswith("jd://")
     provider, model = llm.get_settings("extract")
     model_id = f"{provider}/{model}"
-    path = _cache_path(source["url"], company, role, level, text_kind, model_id, text if is_jd else None)
+    path = _cache_path(source["url"], company, role, level, text_kind, model_id, text)
     if use_cache and os.path.exists(path):
         with open(path) as f:
             return json.load(f)["facts"], True
@@ -236,6 +239,8 @@ def ground(candidates: list[dict], sources: dict, already: list[dict] | None = N
                 "stage": stage if section == "interview" else "",
                 "level": level if section == "interview" else "",
                 "hedged": hedged,
+                "source_type": src.get("type", ""),
+                "official": bool(src.get("official")),
             })
     return grounded, rejected
 
@@ -258,4 +263,5 @@ def location_fact(sid: str, source: dict, location: str | None) -> dict | None:
         "fact": f"Posting location: {place}{where}.", "exact_quote": found["quote"], "section": "role",
         "is_experience": False, "source_id": sid, "published_date": source.get("published_date"),
         "grounded_in": "full", "stage": "", "level": "", "hedged": False, "pinned": True,
+        "source_type": source.get("type", ""), "official": bool(source.get("official")),
     }

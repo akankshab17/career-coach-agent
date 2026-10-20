@@ -368,3 +368,90 @@ def test_wrong_subject_facts_are_rejected_and_counted_in_the_ground_line(world, 
     assert "1 wrong-subject" in capsys.readouterr().err
     debug = result.stats.debug_report(result.sources)
     assert "[wrong-subject]" in debug and "describes extern's own offering" in debug
+
+
+# ---- careers pages, timelines and source types through the whole pipeline ----
+
+CAREERS = "https://www.acme.com/company/careers/university/new-grads"
+AGGREGATOR = "https://jobright.ai/jobs/associate-product-manager-acme"
+MENU_PAGE = "".join(f"## Product {n}\n\nShort blurb about product {n}.\n\n" for n in range(300))
+CAREERS_CONTENT = (
+    "# New graduate jobs at Acme.\n\nLooking to launch your career at Acme? You are in the right place.\n\n"
+    "## Associate Product Manager Program\n\nThis two-year rotational program for new graduates gives you ownership of "
+    "products, mentorship from senior leaders, and exposure to the APM community. Eligibility: a degree by 2027.\n\n"
+    "## What you will do\n\nYou will own a defined area of a product, run customer discovery interviews, partner with engineers "
+    "and designers, and present your product strategy to senior leaders every quarter during the program.\n\n"
+    "## Ready to apply?\n\nApplications open in early July. Submit your application promptly."
+)
+CAREERS_EXTRACTED = {
+    CAREERS: [
+        {"fact": "The APM program is a two-year rotational program for new graduates.",
+         "exact_quote": "This two-year rotational program for new graduates gives you ownership of products", "section": "role"},
+        {"fact": "Applications open in early July.", "exact_quote": "Applications open in early July", "section": "timeline"},
+    ],
+    NEWS: EXTRACTED[NEWS],
+    REDDIT: EXTRACTED[REDDIT],
+}
+
+
+def test_a_careers_page_with_a_long_menu_yields_facts_and_timeline_stays_out_of_the_tldr(world, monkeypatch, capsys):
+    helpers.TEXTS[CAREERS] = MENU_PAGE + CAREERS_CONTENT
+    assert (MENU_PAGE + CAREERS_CONTENT).find("two-year rotational") > search.FULL_TEXT_CHARS  # the old head-cap kept only menu
+    writer = """## TL;DR
+- Round one is a string parsing screen [F4].
+- Applications open in early July [F2].
+## 1. Company overview + recent news
+Acme builds payment software [F3].
+## 2. Interview process + common questions
+**Stage not specified**
+- The interview had three rounds [F4].
+**Timeline**
+- Applications open in early July [F2].
+## 3. What the role really needs
+- The APM program is a two-year rotational program for new graduates [F1].
+## 4. How to prepare
+1. Practice string parsing [F5].
+2. Plan your application for early July [F2].
+## 5. Questions to ask the interviewer
+1. How does the rotation work for new graduates [F1]?
+"""
+    monkeypatch.setattr(llm, "generate", helpers.fake_llm(CAREERS_EXTRACTED, writer))
+
+    def gather(company, role, level, jd, today=None, **kw):
+        return {"careers": [res(9, url=CAREERS, title="New grads")], "company": [res(1, url=NEWS)],
+                "interview": [res(2, url=REDDIT)], "posting": []}
+
+    monkeypatch.setattr(graph, "gather_research", gather)
+    result = graph.run_pipeline("Acme", "Associate Product Manager", "new-grad", None, today=TODAY)
+    text = result.text
+
+    assert result.sources["S1"]["type"] == "company-site" and result.sources["S1"]["official"]
+    section = lambda n: text.split(f"## {n}")[1].split("\n## ")[0]  # noqa: E731
+    assert "two-year rotational program" in section("3.")
+    assert "No official posting text found" not in text  # the careers page is official text
+    assert "**Timeline**\n- Applications open in early July" in section("2.")
+    assert "July" not in section("TL;DR") and "July" not in section("4.")
+    codes = [d.code for d in result.stats.drops]
+    assert "tldr-timeline" in codes and "derived-cites-timeline" in codes
+    debug = result.stats.debug_report(result.sources)
+    assert "(role, S1 [company-site])" in debug and "(timeline, S1 [company-site])" in debug
+
+
+def test_without_any_official_text_section_3_says_so_and_labels_its_facts(world, monkeypatch):
+    helpers.TEXTS[AGGREGATOR] = "Associate Product Manager. You will own a defined area of a product and run customer discovery. " * 8
+    extracted = {**CAREERS_EXTRACTED, AGGREGATOR: [
+        {"fact": "You will own a defined area of a product.", "exact_quote": "You will own a defined area of a product", "section": "role"}]}
+    writer = "## 3. What the role really needs\n- You will own a defined area of a product [F4].\n"
+    monkeypatch.setattr(llm, "generate", helpers.fake_llm(extracted, writer))
+
+    def gather(company, role, level, jd, today=None, **kw):
+        posting = res(5, "APM at Acme", AGGREGATOR, full_text=helpers.TEXTS[AGGREGATOR])
+        return {"company": [res(1, url=NEWS)], "interview": [res(2, url=REDDIT)], "posting": [posting]}
+
+    monkeypatch.setattr(graph, "gather_research", gather)
+    monkeypatch.setattr(graph, "search_more", lambda *a, **k: [])  # the retry finds nothing better
+    result = graph.run_pipeline("Acme", "Associate Product Manager", "new-grad", None, today=TODAY)
+    s3 = result.text.split("## 3. ")[1].split("\n## ")[0]
+    assert s3.startswith("What the role really needs (Inferred, not from a JD)")
+    assert "No official posting text found; based on job aggregator." in s3
+    assert "You will own a defined area of a product (job aggregator)" in s3

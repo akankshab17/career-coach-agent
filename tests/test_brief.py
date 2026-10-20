@@ -50,7 +50,8 @@ def test_writer_prompt_lists_only_grounded_facts_by_section():
     tldr = user.split("## TL;DR")[1].split("## 1.")[0]
     assert "NO interview facts" in tldr and "Never describe interview stages" in tldr
 
-    with_posting = {**SOURCES, "S5": {**res(5), "kind": "company", "group": "posting", "full_text": "jd text"}}
+    with_posting = {**SOURCES, "S5": {**res(5), "kind": "company", "group": "posting", "full_text": "jd text",
+                                      "type": "official-posting", "official": True}}
     _, user = brief.build_writer_prompt("Stripe", "SWE", "new-grad", FACTS, with_posting, TODAY)
     assert "Inferred" not in user
 
@@ -129,6 +130,7 @@ def test_full_brief_output_has_all_six_headings_even_when_writer_stops_early():
     for h in HEADINGS[:3] + ["## 3. What the role really needs (Inferred, not from a JD)"] + HEADINGS[4:]:
         assert h + "\n" in text
     assert text.count(brief.PLACEHOLDER) == 5  # sections 1-5: the cut-off "Stripe builds" is uncited -> dropped
+    assert "No official posting text found.\n" + brief.PLACEHOLDER in text  # SOURCES here has no official posting
 
 
 def test_tldr_interview_claims_need_interview_facts():
@@ -586,3 +588,147 @@ def test_writer_prompt_restricts_prep_and_questions_to_role_and_interview_facts(
     system, user = brief.build_writer_prompt("Stripe", "SWE", "new-grad", FACTS, SOURCES, TODAY)
     assert "must be ROLE or INTERVIEW facts. Never base them on company news" in system
     assert "each citing a ROLE or INTERVIEW fact; no company news" in user
+
+
+# ---- section 3 when there is no official posting text ----
+
+def srcs(**types):
+    """Sources S1.. with the given type each (official ones get official=True)."""
+    out = {}
+    for n, (sid, t) in enumerate(types.items(), 1):
+        out[sid.upper()] = {**res(n, url=f"https://example.com/{n}"), "kind": "other", "group": "posting", "type": t,
+                            "official": t == "official-posting", "full_text": "x" * 600}
+    return out
+
+
+def role_facts(*types):
+    return [fact(f"Role fact {n}.", f"role quote {n}", "role", f"S{n}") | {"source_type": t} for n, t in enumerate(types, 1)]
+
+
+def test_section3_says_when_there_is_no_official_posting_and_labels_each_fact_by_source():
+    facts = role_facts("third-party-guide", "job-aggregator")
+    body = "## 3. What the role really needs\n- Role fact 1 [F1].\n- Role fact 2 [F2].\n- Both together [F1][F2].\n"
+    sources = srcs(s1="third-party-guide", s2="job-aggregator")
+    stats = RunStats()
+    out = brief.check_body(body, facts, stats, sources)
+    s3 = out.split("## 3. ")[1].split("## 4.")[0]
+    lines = [l for l in s3.splitlines()[1:] if l.strip()]
+    assert lines[0] == "No official posting text found; based on third-party guide and job aggregator."
+    assert lines[1:] == ["- Role fact 1 (third-party guide) [F1].", "- Role fact 2 (job aggregator) [F2].",
+                         "- Both together (third-party guide and job aggregator) [F1][F2]."]
+    assert [r.kind for r in stats.rewrites] == ["source-label"] * 3
+    assert "(Inferred, not from a JD)" in out.split("## 3. ")[1].split("\n")[0]
+
+
+def test_no_note_or_labels_when_an_official_source_exists_or_a_jd_was_given():
+    facts = role_facts("official-posting", "third-party-guide")
+    body = "## 3. What the role really needs\n- Role fact 1 [F1].\n- Role fact 2 [F2].\n"
+    out = brief.check_body(body, facts, RunStats(), srcs(s1="official-posting", s2="third-party-guide"))
+    assert "No official posting text" not in out and "(third-party guide)" not in out and "## 3. What the role really needs\n" in out
+
+    jd = brief.collect_sources({"company": []}, "Acme", jd="my pasted job description " * 40)
+    assert jd["S1"]["type"] == "official-posting" and brief.has_role_document(jd)
+
+
+def test_note_without_any_role_facts_keeps_the_placeholder():
+    out = brief.check_body("## 3. What the role really needs\n", [], RunStats(), srcs(s1="job-aggregator"))
+    assert "No official posting text found.\n" + brief.PLACEHOLDER in out
+
+
+def test_a_careers_page_counts_as_official_text_for_section_3():
+    sources = brief.collect_sources({"careers": [res(1, url="https://www.acme.com/company/careers/university/apm", full_text="x" * 600)]}, "Acme")
+    assert sources["S1"]["type"] == "company-site" and sources["S1"]["official"] is True and brief.has_role_document(sources)
+    news = brief.collect_sources({"company": [res(1, url="https://www.acme.com/news/q4", full_text="x" * 600)]}, "Acme")
+    assert news["S1"]["official"] is False and not brief.has_role_document(news)
+    guide = brief.collect_sources({"posting": [res(1, url="https://jobright.ai/jobs/apm", full_text="x" * 600)]}, "Acme")
+    assert guide["S1"]["type"] == "job-aggregator" and not brief.has_role_document(guide)
+
+
+def test_official_sources_are_preferred_when_the_writer_budget_is_tight():
+    official = [fact(f"official {i}.", f"oq {i}", "role", "S1") | {"official": True} for i in range(4)]
+    other = [fact(f"other {i}.", f"xq {i}", "role", f"S{2 + i % 3}") | {"official": False} for i in range(10)]
+    chosen = brief.select_for_writing(other + official, limit=6)
+    assert [f for f in chosen if f["official"]] == official  # every official fact is in...
+    assert len([f for f in chosen if not f["official"]]) == 2  # ...before the others fill what is left
+
+    interview = [fact(f"official iv {i}.", f"ivq {i}", "interview", "S1", level="new-grad") | {"official": True} for i in range(3)]
+    forum = [fact(f"forum iv {i}.", f"fq {i}", "interview", "S5", level="new-grad") | {"official": False} for i in range(10)]
+    chosen = brief.select_for_writing(forum + interview, limit=6)
+    assert all(f in chosen for f in interview)
+
+
+# ---- timeline ----
+
+TL = fact("Applications open in early July.", "applications open in early July", "timeline", "S3") | {"source_type": "third-party-guide"}
+IV = [fact(f"Interview fact {n}.", f"iq {n}", "interview", "S2", stage="onsite") for n in range(3)]
+RL = fact("You will build APIs.", "build APIs", "role", "S1")
+
+
+def test_timeline_facts_do_not_belong_in_the_tldr_or_in_prep_and_questions():
+    facts = IV + [TL, RL]  # F1-F3 interview, F4 timeline, F5 role
+    body = (
+        "## TL;DR\n- Interview fact 0 [F1].\n- Applications open in July [F4].\n"
+        "## 4. How to prepare\n1. Practice APIs [F5].\n2. Apply by July [F4].\n"
+        "## 5. Questions to ask the interviewer\n1. Which APIs would I build [F5]?\n2. When do offers go out [F4]?\n"
+    )
+    stats = RunStats()
+    out = brief.check_body(body, facts, stats)
+    assert "July" not in out
+    assert [d.code for d in stats.drops] == ["tldr-timeline", "derived-cites-timeline", "derived-cites-timeline"]
+    assert "tldr-timeline" in brief.DROP_REASONS and "derived-cites-timeline" in brief.DROP_REASONS
+
+
+def test_timeline_stays_in_section_2_under_its_own_sub_heading():
+    facts = IV + [TL, RL]
+    body = ("## 2. Interview process + common questions\n**Onsite**\n- Interview fact 0 [F1].\n"
+            "**Timeline**\n- Applications open in early July [F4].\n")
+    out = brief.check_body(body, facts, RunStats())
+    s2 = out.split("## 2. ")[1].split("## 3.")[0]
+    assert "**Timeline**\n- Applications open in early July [F4]." in s2 and "**Onsite**" in s2
+
+
+def test_timeline_facts_do_not_count_as_interview_data():
+    out = brief.check_body("## TL;DR\n- Role stuff [F2].\n", [TL, RL], RunStats())
+    assert "Limited interview data (0 sources)." in out and "No interview reports found." in out
+
+
+def test_section_2_with_only_a_timeline_still_says_no_interview_reports_were_found():
+    out = brief.check_body("## 2. Interview process + common questions\n**Timeline**\n- Applications open in early July [F1].\n", [TL], RunStats())
+    s2 = out.split("## 2. ")[1].split("## 3.")[0]
+    assert s2.splitlines()[1] == "No interview reports found." and "**Timeline**" in s2
+
+
+def test_writer_prompt_has_a_timeline_block_and_rules():
+    system, user = brief.build_writer_prompt("Acme", "APM", "new-grad", IV + [TL, RL], SOURCES, TODAY)
+    assert "### timeline facts\n[F4]" in user
+    assert 'final bold label line "**Timeline**"' in user and "no timeline/deadline facts" in user
+    assert "NOT interview content" in system and "never in the TL;DR" in system
+
+
+def test_up_to_four_timeline_facts_are_always_sent_beyond_the_cap():
+    tl = [fact(f"Date {n}.", f"tq {n}", "timeline", f"S{n % 2}") for n in range(7)]
+    interview = [fact(f"i {n}.", f"iq {n}", "interview", f"S{10 + n % 5}") for n in range(40)]
+    chosen = brief.select_for_writing(tl + interview)
+    assert sum(f["section"] == "timeline" for f in chosen) == brief.TIMELINE_MAX == 4
+    assert len(chosen) <= brief.MAX_WRITER_FACTS
+
+
+# ---- years that come from a source's date ----
+
+def test_a_year_is_fine_when_a_cited_source_is_dated_that_year_or_the_label_says_so():
+    facts = [fact("Salesforce closed the last mile of AI integration.", "closed the last mile", "company", "S1", published="2026-02-25")]
+    body = ("## 1. Company overview + recent news\n"
+            "In early 2026 Salesforce closed the last mile of AI integration (reported Feb 2026) [F1].\n"
+            "In 2025 Salesforce closed the last mile of AI integration [F1].\n"
+            "Salesforce closed the last mile of AI integration by 2030 [F1].\n")
+    stats = RunStats()
+    out = brief.check_body(body, facts, stats)
+    assert "In early 2026" in out and "(reported Feb 2026)" in out
+    assert [(d.code, d.detail) for d in stats.drops] == [("number-not-in-facts", "2025"), ("number-not-in-facts", "2030")]
+
+
+def test_the_year_allowance_needs_a_dated_source():
+    facts = [fact("Salesforce closed the last mile.", "closed the last mile", "company", "S1")]  # undated
+    stats = RunStats()
+    brief.check_body("## 1. Company overview + recent news\nIn early 2026 Salesforce closed the last mile [F1].\n", facts, stats)
+    assert [d.code for d in stats.drops] == ["number-not-in-facts"]

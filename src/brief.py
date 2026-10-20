@@ -7,13 +7,14 @@ from dataclasses import dataclass, field
 from datetime import date
 
 from facts import HEDGE_WORD_RE, LOWERABLE_STARTERS, NUMBER_RE, REJECT_REASONS, add_hedge
-from search import is_blocked, source_kind
+from search import TYPE_LABEL, is_blocked, is_careers_page, source_kind, source_type
 
 JD_URL = "jd://user-provided"
 LEVEL_LABEL = {"intern": "intern", "new-grad": "new grad", "experienced": "experienced"}
 KEY_SECTIONS = ("interview", "role")  # TL;DR is built from these; its coverage = the interview count
 DERIVED_SECTIONS = ("how to prepare", "questions to ask")  # may draw conclusions, but must cite facts
 PLACEHOLDER = "No grounded information found for this section."
+TIMELINE_MAX = 4  # application-calendar facts sent to the writer
 NO_INTERVIEW = "No interview reports found."
 MIN_INTERVIEW_FACTS = 3  # fewer than this and the TL;DR opens with a "Limited interview data" warning
 LEVEL_PROCESS = {"intern": "internship process", "new-grad": "new-grad process", "experienced": "full-time process"}
@@ -41,8 +42,13 @@ def add_sources(sources: dict[str, dict], results: list[dict], group: str, compa
             continue
         known.add(r["url"])
         sid = f"S{len(sources) + 1}"
-        kind = "jd" if r["url"] == JD_URL else source_kind(r["url"], company)
-        sources[sid] = {**r, "kind": kind, "group": group}
+        if r["url"] == JD_URL:  # the JD the user pasted is as official as it gets
+            kind, stype, official = "jd", "official-posting", True
+        else:
+            kind = source_kind(r["url"], company)
+            stype = source_type(r["url"], company, group, r.get("published_date"))
+            official = stype == "official-posting" or is_careers_page(r["url"], company, group)
+        sources[sid] = {**r, "kind": kind, "group": group, "type": stype, "official": official}
         new_ids.append(sid)
     return new_ids
 
@@ -75,6 +81,7 @@ REWRITE_KINDS = {
     "stage-split": "sentence mixed facts from different interview stages; split into one sentence per fact",
     "stage-trim": "TL;DR bullet mixed interview stages; trimmed to its first fact",
     "level-label": "fact from a different seniority level's process; labelled as such",
+    "source-label": "section 3 has no official posting text, so each fact is labelled with its source type",
 }
 
 
@@ -94,6 +101,8 @@ DROP_REASONS = {
     "company-section-cap": f"company section already has {COMPANY_MAX_SENTENCES} sentences",
     "question-logistics-or-rumor": "question about interview logistics, or based on a rumor/unconfirmed fact",
     "derived-cites-company-news": "'How to prepare' and 'Questions to ask' may cite role or interview facts only, not company news",
+    "derived-cites-timeline": "'How to prepare' and 'Questions to ask' may cite role or interview facts only, not application dates",
+    "tldr-timeline": "application timelines and deadlines are not interview content and don't belong in the TL;DR",
 }
 
 
@@ -167,7 +176,8 @@ class RunStats:
                 tag = " [snippet-grounded]" if f.get("grounded_in") == "snippet" else ""
                 tag += " [hedged source]" if f.get("hedged") else ""
                 where = f"{f['section']}/{f['stage']}" if f.get("stage") else f["section"]
-                lines.append(f"- ({where}, {f['source_id']}){tag} {f['fact']}")
+                kind = f" [{f['source_type']}]" if f.get("source_type") else ""
+                lines.append(f"- ({where}, {f['source_id']}{kind}){tag} {f['fact']}")
             lines.append("")
 
         lines += ["# Rejected facts (grounding)", ""]
@@ -222,6 +232,10 @@ Rules:
   one, end the sentence with the label shown on the fact, e.g. "(full-time process)".
 - Facts marked HEDGED come from a source that is unconfirmed ("may", "reportedly"). Keep the hedge in your
   sentence (e.g. "Reportedly, ..."); never state them as completed or certain.
+- Timeline facts (application dates, deadlines, decision timing) are NOT interview content: they go only under the
+  "Timeline" sub-heading of section 2 and never in the TL;DR.
+- Facts show their source type (official-posting, company-site, third-party-guide, job-aggregator, forum/blog,
+  news). Company career pages and postings are the most reliable for the process and the role.
 - Interview facts carry a stage (oa, phone-screen, team-screen, onsite, unknown). NEVER combine facts from
   different stages in one sentence, anywhere in the brief.
 - For company news with a published date, add "(reported Mon YYYY)" from that date.
@@ -246,6 +260,13 @@ def _round_robin_by_source(facts: list[dict], per_source: int | None = None) -> 
         rnd += 1
 
 
+def _ranked(facts: list[dict], per_source: int | None = None) -> list[dict]:
+    """Facts from official sources (the company's postings and career pages) first, each half interleaved across sources."""
+    official = [f for f in facts if f.get("official")]
+    others = [f for f in facts if not f.get("official")]
+    return _round_robin_by_source(official, per_source) + _round_robin_by_source(others, per_source)
+
+
 def select_for_writing(facts: list[dict], limit: int = MAX_WRITER_FACTS, level: str | None = None) -> list[dict]:
     """At most `limit` facts for the writer. Posting/role and interview facts come first; company facts get
     what is left, but never fewer than COMPANY_RESERVE (so section 1 isn't empty). Interview facts from the
@@ -254,12 +275,13 @@ def select_for_writing(facts: list[dict], limit: int = MAX_WRITER_FACTS, level: 
     so fact ids are stable."""
     pinned = [f for f in facts if f.get("pinned")]
     pool = [f for f in facts if not f.get("pinned")]
-    limit -= len(pinned)
-    company = _round_robin_by_source([f for f in pool if f["section"] == "company"], COMPANY_FACTS_PER_SOURCE)
+    timeline = _ranked([f for f in pool if f["section"] == "timeline"])[:TIMELINE_MAX]
+    limit -= len(pinned) + len(timeline)
+    company = _ranked([f for f in pool if f["section"] == "company"], COMPANY_FACTS_PER_SOURCE)
     interview_all = [f for f in pool if f["section"] == "interview"]
     fits = [f for f in interview_all if not level or f.get("level") in (level, "unknown", "", None)]
-    interview = _round_robin_by_source(fits) + _round_robin_by_source([f for f in interview_all if f not in fits])
-    role = _round_robin_by_source([f for f in pool if f["section"] == "role"])
+    interview = _ranked(fits) + _ranked([f for f in interview_all if f not in fits])
+    role = _ranked([f for f in pool if f["section"] == "role"])
 
     reserve = min(COMPANY_RESERVE, len(company))
     room = limit - reserve
@@ -269,7 +291,7 @@ def select_for_writing(facts: list[dict], limit: int = MAX_WRITER_FACTS, level: 
     chosen = interview[:interview_quota] + role[:role_quota]
     company_room = min(COMPANY_FACTS_FOR_WRITER, limit - len(chosen))
     chosen += company[:max(company_room, reserve)]
-    keep = {id(f) for f in chosen} | {id(f) for f in pinned}
+    keep = {id(f) for f in chosen} | {id(f) for f in pinned} | {id(f) for f in timeline}
     return [f for f in facts if id(f) in keep]
 
 
@@ -283,7 +305,7 @@ def level_mismatch(f: dict, level: str | None) -> bool:
 
 
 def _fact_line(fid: str, f: dict, level: str | None = None) -> str:
-    tags = [f"source {f['source_id']}"]
+    tags = [f"source {f['source_id']}" + (f" {f['source_type']}" if f.get("source_type") else "")]
     if f.get("stage"):
         tags.append(f"stage {f['stage']}")
     if f.get("level") in LEVEL_PROCESS:
@@ -300,14 +322,15 @@ def _fact_line(fid: str, f: dict, level: str | None = None) -> str:
 
 
 def has_role_document(sources: dict) -> bool:
-    """True if section 3 can come from a real JD or posting (not inferred)."""
-    return any(s.get("group") in ("posting", "role", "jd") and s.get("full_text") for s in sources.values())
+    """True if section 3 can rest on official text: the user's JD, the company's own posting, or its careers/program page.
+    A job aggregator or a third-party guide doesn't count."""
+    return any(s.get("official") and s.get("full_text") for s in sources.values())
 
 
 def build_writer_prompt(company, role, level, facts: list[dict], sources: dict, today: date) -> tuple[str, str]:
     by_id = fact_ids(facts)
     blocks = []
-    for section in ("company", "interview", "role"):
+    for section in ("company", "interview", "timeline", "role"):
         if section == "interview":  # grouped by stage, in interview order
             lines = [_fact_line(fid, f, level) for stage in STAGE_ORDER for fid, f in by_id.items()
                      if f["section"] == "interview" and f["stage"] == stage]
@@ -319,16 +342,16 @@ def build_writer_prompt(company, role, level, facts: list[dict], sources: dict, 
     label = LEVEL_LABEL[level]
     n_interview = sum(f["section"] == "interview" for f in facts)
     if n_interview >= MIN_INTERVIEW_FACTS:
-        tldr_rule = ("exactly 3 bullets, ONLY from interview facts, no company news: 1) FORMAT: how the interview is "
+        tldr_rule = ("exactly 3 bullets, ONLY from interview facts, no company news, no timeline/deadline facts: 1) FORMAT: how the interview is "
                      "structured, from facts of ONE stage (the most informative one); 2) KEY TOPICS: what is asked, "
                      f"from facts of ONE stage; 3) STANDOUT INSIGHT: one surprising or useful fact a {label} candidate "
                      "should know. A bullet never mixes stages.")
     elif n_interview:
         tldr_rule = (f"there are only {n_interview} interview fact(s). The system adds a first bullet saying interview data is "
-                     "limited; do NOT write one. Write at most 2 bullets, ONLY from the interview facts, one stage per bullet.")
+                     "limited; do NOT write one. Write at most 2 bullets, ONLY from the interview facts, one stage per bullet, never timeline facts.")
     else:
         tldr_rule = ("there are NO interview facts. The system adds the first bullets itself; do NOT write them. Write at most "
-                     "2 bullets from role facts about what the role needs. Never describe interview stages or format.")
+                     "2 bullets from role facts about what the role needs. Never describe interview stages or format, and never use timeline facts.")
     facts_text = "\n\n".join(blocks)
     user = f"""Today's date: {today.isoformat()}
 Company: {company}
@@ -346,9 +369,11 @@ Write the brief with these headings exactly, in this order:
 "Stripe agreed to acquire AI gateway OpenRouter for over $7 billion (reported Aug 2026) [F9][F10].")
 ## 2. Interview process + common questions
 (group by stage: for each stage that has facts, in this order, write a bold label line, then one bullet per
-fact or per small group of facts from THAT stage only. Labels in order: {stage_labels}. Skip stages with no facts.)
+fact or per small group of facts from THAT stage only. Labels in order: {stage_labels}. Skip stages with no facts.
+Then, if there are timeline facts, a final bold label line "**Timeline**" followed by one bullet per timeline fact.)
 {s3}
-(role facts; start with the "Posting location" fact if there is one)
+(role facts; start with the "Posting location" fact if there is one. If none of the role facts come from an official
+source, say which source type each statement rests on, e.g. "(job aggregator)")
 ## 4. How to prepare
 (4-6 numbered practice items, each derived from ROLE or INTERVIEW facts and citing them; no company news)
 ## 5. Questions to ask the interviewer
@@ -475,6 +500,15 @@ def _parse(body: str) -> list[dict]:
 INTERVIEW_WORDS_RE = re.compile(r"interview|\brounds?\b|\bstages?\b|screen|onsite|on-site|assessment|\bOA\b|\bloop\b", re.I)
 
 
+SOURCE_LABEL_RE = re.compile(r"\((?:" + "|".join(re.escape(v) for v in TYPE_LABEL.values()) + r")\)", re.I)
+
+
+def source_labels(cited: list[dict]) -> str:
+    """'third-party guide' / 'third-party guide and job aggregator' for the facts a sentence rests on."""
+    names = list(dict.fromkeys(TYPE_LABEL[f["source_type"]] for f in cited if f.get("source_type") in TYPE_LABEL))
+    return " and ".join(names)
+
+
 def check_body(body: str, facts: list[dict], stats: RunStats, sources: dict | None = None, level: str | None = None) -> str:
     """Drop sentences that cite no real fact, add numbers, or overclaim; rewrite unattributed forum facts;
     cap the company section; make sure all six sections exist, in order; renumber lists."""
@@ -482,6 +516,7 @@ def check_body(body: str, facts: list[dict], stats: RunStats, sources: dict | No
     body = normalize_citations(body, len(facts))
     lines = _parse(body)
     company_sentences = 0
+    unofficial_role = sources is not None and not has_role_document(sources)  # section 3 rests on unofficial text
 
     for line in lines:
         if "sents" not in line:
@@ -512,12 +547,21 @@ def check_body(body: str, facts: list[dict], stats: RunStats, sources: dict | No
             sent = CITE_RE.sub(lambda m: m.group(0) if m.group(1) in by_id else "", sent)
             fact_text = " ".join(by_id[i]["fact"] + " " + by_id[i]["exact_quote"] for i in valid)
             claim = REPORTED_RE.sub("", CITE_RE.sub("", sent))
-            missing = [n for n in NUMBER_RE.findall(claim) if n not in NUMBER_RE.findall(fact_text)]
+            # A year is fine if a cited source is dated that year ("In early 2026 ..." from a Feb 2026 article); the
+            # "(reported Mon YYYY)" label was already removed from `claim`.
+            years = {by_id[i]["published_date"][:4] for i in valid if by_id[i].get("published_date")}
+            missing = [n for n in NUMBER_RE.findall(claim) if n not in NUMBER_RE.findall(fact_text) and n not in years]
             if missing:
                 stats.drops.append(Drop(section, sent, "number-not-in-facts", ", ".join(missing)))
                 return
             if derived and any(by_id[i]["section"] == "company" for i in valid):
                 stats.drops.append(Drop(section, sent, "derived-cites-company-news"))
+                return
+            if derived and any(by_id[i]["section"] == "timeline" for i in valid):
+                stats.drops.append(Drop(section, sent, "derived-cites-timeline"))
+                return
+            if is_tldr and any(by_id[i]["section"] == "timeline" for i in valid):
+                stats.drops.append(Drop(section, sent, "tldr-timeline"))
                 return
             if is_tldr and INTERVIEW_WORDS_RE.search(CITE_RE.sub("", sent)) and not any(
                     by_id[i]["section"] == "interview" for i in valid):
@@ -542,6 +586,12 @@ def check_body(body: str, facts: list[dict], stats: RunStats, sources: dict | No
                 new = add_level_label(sent, label)
                 stats.rewrites.append(Rewrite(section, sent, new, "level-label"))
                 sent = new
+            if unofficial_role and section.startswith("3.") and not SOURCE_LABEL_RE.search(sent):
+                label = source_labels([by_id[i] for i in valid])
+                if label:
+                    new = add_level_label(sent, label)
+                    stats.rewrites.append(Rewrite(section, sent, new, "source-label"))
+                    sent = new
             kept.append(sent)
 
         for sent in line["sents"]:
@@ -582,7 +632,12 @@ def check_body(body: str, facts: list[dict], stats: RunStats, sources: dict | No
         if f.get("pinned") and not cited_in_s3:
             location_line = fact_sentence(fid, f)
             break
-    return ensure_sections("\n".join(out), s3, len(interview), len({f["source_id"] for f in interview}), location_line)
+    s3_note = None
+    if unofficial_role:  # no official posting text: say so, and what section 3 rests on
+        role_facts = [f for f in facts if f["section"] == "role" and not f.get("pinned")]
+        types = source_labels(role_facts)
+        s3_note = f"No official posting text found; based on {types}." if types else "No official posting text found."
+    return ensure_sections("\n".join(out), s3, len(interview), len({f["source_id"] for f in interview}), location_line, s3_note)
 
 
 def _section_index(heading: str) -> int | None:
@@ -599,7 +654,7 @@ def _bare(line: str) -> str:
 
 
 def ensure_sections(body: str, s3_heading: str, n_interview_facts: int, n_interview_sources: int,
-                    location_line: str | None = None) -> str:
+                    location_line: str | None = None, s3_note: str | None = None) -> str:
     """Re-emit the six sections in order under their canonical headings. A missing or empty section
     (e.g. the writer's output was cut off) gets a placeholder instead of disappearing. With fewer than
     MIN_INTERVIEW_FACTS interview facts the TL;DR opens with a data warning; the posting's location opens section 3."""
@@ -618,8 +673,14 @@ def ensure_sections(body: str, s3_heading: str, n_interview_facts: int, n_interv
         rest = [l for l in content[0].splitlines()
                 if l.strip() and not _bare(l).startswith("Limited interview data") and _bare(l) != NO_INTERVIEW]
         content[0] = "\n".join(lead + rest)
+    if n_interview_facts == 0 and content[2].replace(PLACEHOLDER, "").strip(" \n-*_"):
+        content[2] = NO_INTERVIEW + "\n\n" + content[2].replace(PLACEHOLDER, "").strip("\n")  # e.g. only a Timeline came through
+    section3 = content[3].replace(PLACEHOLDER, "").strip("\n")
     if location_line:
-        content[3] = location_line + "\n" + content[3].replace(PLACEHOLDER, "").strip("\n")
+        section3 = location_line + ("\n" + section3 if section3.strip(" -*_") else "")
+    if not section3.strip(" -*_"):
+        section3 = PLACEHOLDER
+    content[3] = f"{s3_note}\n{section3}" if s3_note else section3
     out = []
     for heading, text in zip(headings, content):
         text = text.strip("\n")

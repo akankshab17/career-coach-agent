@@ -26,6 +26,12 @@ PRICES = {
     ("openai", "gpt-4o-mini"): (0.15, 0.60),
 }
 
+# Reasoning effort for Groq's gpt-oss models. Extraction is many small, simple calls: "low" keeps the hidden
+# reasoning (billed as output tokens) short. Writing is one call that must follow many rules: "medium".
+EFFORT_ENV = {"extract": "EXTRACT_REASONING_EFFORT", "write": "WRITE_REASONING_EFFORT"}
+DEFAULT_EFFORT = {"extract": "low", "write": "medium"}
+EFFORTS = ("low", "medium", "high")
+
 MAX_OUTPUT_TOKENS = 16384  # reasoning models (gpt-oss) spend part of this on hidden reasoning
 RETRIES = 2  # retries after the first attempt -> 3 attempts total
 BACKOFF_SECONDS = 2  # waits 2s, then 4s
@@ -52,6 +58,8 @@ class CallRecord:
     output_tokens: int
     latency: float
     cost: float | None
+    reasoning_tokens: int | None = None  # part of output_tokens, when the provider reports it
+    effort: str | None = None
 
 
 _calls: list[CallRecord] = []
@@ -68,6 +76,17 @@ def get_settings(task: str = "write") -> tuple[str, str]:
     return provider, model
 
 
+def get_reasoning_effort(task: str, provider: str, model: str) -> str | None:
+    """EXTRACT_/WRITE_REASONING_EFFORT for Groq's gpt-oss models; None (= don't send it) for anything else."""
+    if provider != "groq" or "gpt-oss" not in model.lower():
+        return None
+    raw = (os.getenv(EFFORT_ENV[task]) or "").strip().lower()
+    effort = raw or DEFAULT_EFFORT[task]
+    if effort not in EFFORTS:
+        raise FatalLLMError(f"{EFFORT_ENV[task]} must be one of {', '.join(EFFORTS)} (got '{raw}'). Fix it in your .env file.")
+    return effort
+
+
 def _require_key(name: str) -> str:
     key = os.getenv(name)
     if not key:
@@ -82,32 +101,37 @@ def truncation_count() -> int:
     return _truncated
 
 
-def _chat(client, model: str, system_prompt: str, user_prompt: str) -> tuple[str, int, int]:
-    # Groq and OpenAI share the same chat-completions shape.
+def _chat(client, model: str, system_prompt: str, user_prompt: str, reasoning_effort: str | None = None):
+    """One chat-completions call (Groq and OpenAI share the shape).
+    Returns (text, input tokens, output tokens, reasoning tokens or None)."""
+    extra = {"reasoning_effort": reasoning_effort} if reasoning_effort else {}
     resp = client.chat.completions.create(
         model=model,
         temperature=0.2,
         max_completion_tokens=MAX_OUTPUT_TOKENS,
         messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
+        **extra,
     )
     choice = resp.choices[0]
     if choice.finish_reason == "length":
         global _truncated
         _truncated += 1
         print(f"[llm] WARNING: output hit the {MAX_OUTPUT_TOKENS}-token limit and was cut off", file=sys.stderr)
-    return choice.message.content or "", resp.usage.prompt_tokens, resp.usage.completion_tokens
+    details = getattr(resp.usage, "completion_tokens_details", None)
+    reasoning = getattr(details, "reasoning_tokens", None)
+    return choice.message.content or "", resp.usage.prompt_tokens, resp.usage.completion_tokens, reasoning
 
 
-def _call_groq(model, system_prompt, user_prompt):
+def _call_groq(model, system_prompt, user_prompt, reasoning_effort=None):
     from groq import Groq
 
-    return _chat(Groq(api_key=_require_key("GROQ_API_KEY")), model, system_prompt, user_prompt)
+    return _chat(Groq(api_key=_require_key("GROQ_API_KEY")), model, system_prompt, user_prompt, reasoning_effort)
 
 
-def _call_openai(model, system_prompt, user_prompt):
+def _call_openai(model, system_prompt, user_prompt, reasoning_effort=None):
     from openai import OpenAI
 
-    return _chat(OpenAI(api_key=_require_key("OPENAI_API_KEY")), model, system_prompt, user_prompt)
+    return _chat(OpenAI(api_key=_require_key("OPENAI_API_KEY")), model, system_prompt, user_prompt, reasoning_effort)
 
 
 _PROVIDERS = {"groq": _call_groq, "openai": _call_openai}
@@ -170,14 +194,17 @@ def _classify(exc: Exception, provider: str, model: str) -> LLMError | float | N
 
 
 def generate(system_prompt: str, user_prompt: str, task: str = "write") -> str:
-    """Call the configured model for `task` ("extract" or "write") and record tokens, latency and cost."""
+    """Call the configured model for `task` ("extract" or "write") and record tokens, latency and cost.
+    For Groq gpt-oss models the task's reasoning effort is sent along; other providers/models ignore it."""
     provider, model = get_settings(task)
+    effort = get_reasoning_effort(task, provider, model)
     call = _PROVIDERS[provider]
 
     for attempt in range(RETRIES + 1):
         start = time.perf_counter()
         try:
-            text, in_tok, out_tok = call(model, system_prompt, user_prompt)
+            text, in_tok, out_tok, *rest = call(model, system_prompt, user_prompt, effort)
+            reasoning = rest[0] if rest else None
             break
         except LLMError:
             raise
@@ -201,7 +228,7 @@ def generate(system_prompt: str, user_prompt: str, task: str = "write") -> str:
 
     price = PRICES.get((provider, model))
     cost = (in_tok * price[0] + out_tok * price[1]) / 1_000_000 if price else None
-    _calls.append(CallRecord(provider, model, in_tok, out_tok, latency, cost))
+    _calls.append(CallRecord(provider, model, in_tok, out_tok, latency, cost, reasoning, effort))
     return text
 
 
@@ -228,8 +255,15 @@ def reset_usage() -> None:
     _calls.clear()
 
 
+def _reasoning_total(calls: list[CallRecord]) -> int | None:
+    """Reasoning tokens over the calls that reported them (they are already counted inside the output tokens)."""
+    reported = [c.reasoning_tokens for c in calls if c.reasoning_tokens is not None]
+    return sum(reported) if reported else None
+
+
 def summary_line() -> str:
-    """One-line usage summary over every LLM call since reset_usage(), with tokens per model."""
+    """One-line usage summary over every LLM call since reset_usage(), with tokens per model.
+    Reasoning tokens are shown separately when the provider returns them."""
     if not _calls:
         return "[llm] no calls made"
     in_tok = sum(c.input_tokens for c in _calls)
@@ -237,16 +271,23 @@ def summary_line() -> str:
     latency = sum(c.latency for c in _calls)
     costs = [c.cost for c in _calls]
     cost = "n/a (no price configured)" if None in costs else f"${sum(costs):.4f}"
-    per_model: dict[str, list[int]] = {}
+    total_reasoning = _reasoning_total(_calls)
+    by_model: dict[str, list[CallRecord]] = {}
     for c in _calls:
-        row = per_model.setdefault(c.model, [0, 0, 0])
-        row[0] += 1
-        row[1] += c.input_tokens
-        row[2] += c.output_tokens
-    by_model = "; ".join(f"{m} {n} calls in={i} out={o}" for m, (n, i, o) in per_model.items())
+        by_model.setdefault(c.model, []).append(c)
+    parts = []
+    for model, calls in by_model.items():
+        details = []
+        if (r := _reasoning_total(calls)) is not None:
+            details.append(f"reasoning={r}")
+        if efforts := sorted({c.effort for c in calls if c.effort}):
+            details.append("effort=" + "/".join(efforts))
+        parts.append(f"{model} {len(calls)} calls in={sum(c.input_tokens for c in calls)} "
+                     f"out={sum(c.output_tokens for c in calls)}" + (f" ({', '.join(details)})" if details else ""))
+    reasoning_note = f" (of which reasoning={total_reasoning})" if total_reasoning is not None else ""
     return (
-        f"[llm] provider={_calls[-1].provider} calls={len(_calls)} in={in_tok} tok out={out_tok} tok "
-        f"latency={latency:.1f}s est_cost={cost} | by model: {by_model}"
+        f"[llm] provider={_calls[-1].provider} calls={len(_calls)} in={in_tok} tok out={out_tok} tok{reasoning_note} "
+        f"latency={latency:.1f}s est_cost={cost} | by model: {'; '.join(parts)}"
     )
 
 

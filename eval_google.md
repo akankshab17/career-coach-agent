@@ -1,63 +1,57 @@
 # Interview brief: Google — Software Engineering Intern (intern)
 
 ## TL;DR
-- The internship interview consists of an online coding round followed by two phone interviews[1](https://igotanoffer.com/blogs/tech/google-software-engineer-interview)[2](https://blog.pointblank.club/my-google-internship-interview-experience).
-- Online coding problems focus on string manipulation and hashing[2](https://blog.pointblank.club/my-google-internship-interview-experience).
-- Candidates report that intern coding interviews typically consist of two coding questions in a 45‑minute session and are usually easier than full interviews[3](https://www.reddit.com/r/csMajors/comments/1o0sfb8/google_intern_interview).
+- Candidates report that the Google internship interview consists of 2 technical phone interviews followed by a team‑matching round of phone interviews with various teams, and an offer is extended only when a match is found [1](https://medium.com/dfangshuo/my-google-interview-part-i-d3ff034d2fc).
+- Candidates report: Intern interview questions typically include 2 coding problems in 45 minutes, covering topics such as tree traversal with non‑standard constraints and shortest‑path graph problems, with interviewers often adding extra constraints after the initial solution [2](https://www.reddit.com/r/csMajors/comments/1o0sfb8/google_intern_interview)[3](https://www.reddit.com/r/InterviewCoderHQ/comments/1tu8xk8/google_software_engineering_winter_intern).
+- Hiring decisions for Google interns can take over 90 days after the interview process [4](https://www.google.com/about/careers/applications/jobs/results/100028133205254854-software-engineering-site-reliability-engineering-bsms-intern-2027).
 
 ## 1. Company overview + recent news
-Google focuses on improving how people connect with information[4](https://www.forbes.com/companies/google).
-Google Cloud announced expanded collaborations with EnterpriseSG, Komdigi, NIC, and SIHUB to establish an AI startup innovation corridor from Southeast Asia to Silicon Valley (reported May 2026)[5](https://www.googlecloudpresscorner.com/Google-Cloud-Launches-AI-Startup-Innovation-Corridor-from-Southeast-Asia-to-Silicon-Valley-with-EnterpriseSG-Komdigi-NIC-and-SIHUB).
-Google launched Gemini 3.5 Flash, the first model in a new series combining frontier intelligence with action (reported May 2026)[6](https://blog.google/innovation-and-ai/technology/ai/google-io-2026-all-our-announcements).
-Google’s software engineering processes are more cautious than the “Move fast” environment at companies like Meta[1](https://igotanoffer.com/blogs/tech/google-software-engineer-interview).
-Applications for Google Summer Intern open around mid‑June each year[7](https://medium.com/@venishakalola/google-summer-intern25-interview-experience-6f30de7f9706).
+Google completed its acquisition of Wiz, a leading cloud and AI security platform, and the Wiz team will join Google Cloud while retaining the Wiz brand (reported Mar 2026) [5](https://cloud.google.com/blog/products/identity-security/google-completes-acquisition-of-wiz).
+Google is working to advance the state of the art in computing and build the next generation of intelligent systems for all Google products [4](https://www.google.com/about/careers/applications/jobs/results/100028133205254854-software-engineering-site-reliability-engineering-bsms-intern-2027).
+Most interns at Google are Software Engineering interns [6](https://www.reddit.com/r/IAmA/comments/2oe5me/i_am_a_former_google_engineering_intern_amaa).
 
 ## 2. Interview process + common questions
-**Online assessment**
-- Online assessments include an online coding round as part of the application process[1](https://igotanoffer.com/blogs/tech/google-software-engineer-interview)[2](https://blog.pointblank.club/my-google-internship-interview-experience).
-- The coding round problems are centered on string manipulation and hashing[2](https://blog.pointblank.club/my-google-internship-interview-experience).
-
-**Phone screen**
-- The technical phone screen consists of one to two interviews, typically two phone interviews[1](https://igotanoffer.com/blogs/tech/google-software-engineer-interview)[2](https://blog.pointblank.club/my-google-internship-interview-experience).
-- The initial screening interview takes place via Google Meet the day after shortlisting[7](https://medium.com/@venishakalola/google-summer-intern25-interview-experience-6f30de7f9706).
-- The screening discussion covers the candidate’s resume, projects, and past internships[7](https://medium.com/@venishakalola/google-summer-intern25-interview-experience-6f30de7f9706).
-- The recruiter notes that two elimination‑based technical rounds will follow the screening[7](https://medium.com/@venishakalola/google-summer-intern25-interview-experience-6f30de7f9706).
-
 **Stage not specified**
-- Software engineer interviews at Google are known to be quite grueling, with tough, Google‑specific questions covering a broad range of technical topics, and the overall process usually exceeds eight weeks, including resume screening, recruiter call, online assessments, technical phone screens, and a loop of 4‑6 interviews[1](https://igotanoffer.com/blogs/tech/google-software-engineer-interview).
-- Candidates report that intern coding interviews typically consist of two coding questions in a 45‑minute session and are usually easier than full interviews[3](https://www.reddit.com/r/csMajors/comments/1o0sfb8/google_intern_interview).
+- Interviews at Google are quite grueling [7](https://igotanoffer.com/blogs/tech/google-software-engineer-interview).
+- Questions are tough, highly specific to Google, and cover a broad range of technical and conceptual topics [7](https://igotanoffer.com/blogs/tech/google-software-engineer-interview).
+- To stand out, you need a strong coding foundation, solid system design skills, and a deep understanding of Google’s products and engineering culture [7](https://igotanoffer.com/blogs/tech/google-software-engineer-interview).
+- It’s probably the hardest FAANG+ company to interview for [7](https://igotanoffer.com/blogs/tech/google-software-engineer-interview).
+- The process takes more than eight weeks and includes resume screening, recruiter call, online assessment, technical phone screen, and an interview loop of 4–6 interviews [7](https://igotanoffer.com/blogs/tech/google-software-engineer-interview).
+- Hiring decisions may take over 90 days [4](https://www.google.com/about/careers/applications/jobs/results/100028133205254854-software-engineering-site-reliability-engineering-bsms-intern-2027).
+- Candidates report: Google intern interviews typically consist of 2 coding questions in 45 minutes [2](https://www.reddit.com/r/csMajors/comments/1o0sfb8/google_intern_interview).
+- Candidates report: Topics have included tree traversal with non‑standard constraints and a shortest‑path graph problem [3](https://www.reddit.com/r/InterviewCoderHQ/comments/1tu8xk8/google_software_engineering_winter_intern).
+- Candidates report: After the initial solution, interviewers may add constraints requiring optimization or a different approach [3](https://www.reddit.com/r/InterviewCoderHQ/comments/1tu8xk8/google_software_engineering_winter_intern).
+- Candidates report that the internship interview consists of 2 phone interviews and a team‑matching round [1](https://medium.com/dfangshuo/my-google-interview-part-i-d3ff034d2fc).
+- Candidates report: The 2 phone interviews are technical and their feedback is used by the Hiring Committee to decide progression [1](https://medium.com/dfangshuo/my-google-interview-part-i-d3ff034d2fc).
+- Candidates report that the team‑matching round consists of phone interviews with various teams that might be interested in the intern [1](https://medium.com/dfangshuo/my-google-interview-part-i-d3ff034d2fc).
+- Candidates report that an internship offer is extended only when a match with a team is found [1](https://medium.com/dfangshuo/my-google-interview-part-i-d3ff034d2fc).
 
 ## 3. What the role really needs
-Engineers must present their idea in a design review and obtain approval before starting work[1](https://igotanoffer.com/blogs/tech/google-software-engineer-interview).
-Candidates report: Google is hiring Software Engineering Interns for Summer 2026; the role is a Software Engineering Intern located in Bengaluru, Hyderabad, or Pune[8](https://www.reddit.com/r/FreshersOpportunity/comments/1u81n95/google_internship_2026_software_engineering).
-Candidates report: Candidates pursuing a Master’s degree with strong coding skills can work on large‑scale systems, AI technologies, and products used by billions worldwide[8](https://www.reddit.com/r/FreshersOpportunity/comments/1u81n95/google_internship_2026_software_engineering).
-Candidates report: Tech, MCA, or M.S[8](https://www.reddit.com/r/FreshersOpportunity/comments/1u81n95/google_internship_2026_software_engineering).
-Candidates must be available to work full‑time for 10‑12 weeks during the summer of 2027[9](https://careers.google.com/jobs/results/109864326646375110-software-engineering-intern).
-Applications are reviewed on a rolling basis and early application is encouraged[9](https://careers.google.com/jobs/results/109864326646375110-software-engineering-intern).
-English proficiency is required, and applicants must submit an updated resume and an English transcript[9](https://careers.google.com/jobs/results/109864326646375110-software-engineering-intern).
+The posting location is Sunnyvale, CA, United States [4](https://www.google.com/about/careers/applications/jobs/results/100028133205254854-software-engineering-site-reliability-engineering-bsms-intern-2027).
+Google is hiring Software Engineering Interns for Summer 2026 [8](https://www.reddit.com/r/FreshersOpportunity/comments/1u81n95/google_internship_2026_software_engineering).
+The internship targets students in their penultimate or final year of a full‑time Bachelor’s or Master’s program in the EMEA region, and participants must be located in the UK for the duration of the internship [4](https://www.google.com/about/careers/applications/jobs/results/100028133205254854-software-engineering-site-reliability-engineering-bsms-intern-2027).
+Candidates should be pursuing a Master’s degree with strong coding skills and be prepared to work on large‑scale systems, AI technologies, and products used by billions worldwide [8](https://www.reddit.com/r/FreshersOpportunity/comments/1u81n95/google_internship_2026_software_engineering).
+Google’s engineering culture emphasizes working within strict processes, presenting ideas in design reviews before implementation, and adhering to rigorous engineering standards [7](https://igotanoffer.com/blogs/tech/google-software-engineer-interview).
+Internship locations also include Bengaluru, Hyderabad, and Pune for regional opportunities [8](https://www.reddit.com/r/FreshersOpportunity/comments/1u81n95/google_internship_2026_software_engineering).
 
 ## 4. How to prepare
-1. Practice string‑manipulation and hashing problems to mirror the online coding round topics[2](https://blog.pointblank.club/my-google-internship-interview-experience).
-2. Simulate a 45‑minute coding session with two questions to get comfortable with the typical intern interview format[3](https://www.reddit.com/r/csMajors/comments/1o0sfb8/google_intern_interview).
-3. Prepare a concise presentation of your projects and resume for the phone‑screen discussion[7](https://medium.com/@venishakalola/google-summer-intern25-interview-experience-6f30de7f9706).
-4. Review design‑review best practices and be ready to articulate and defend a technical idea before a reviewer[1](https://igotanoffer.com/blogs/tech/google-software-engineer-interview).
-5. Study large‑scale system design and recent AI advancements (e.g., Gemini 3.5 Flash) to align with potential internship work on AI technologies[6](https://blog.google/innovation-and-ai/technology/ai/google-io-2026-all-our-announcements)[8](https://www.reddit.com/r/FreshersOpportunity/comments/1u81n95/google_internship_2026_software_engineering).
+1. Practice solving coding problems under a 45‑minute limit, focusing on tree traversal and graph shortest‑path algorithms, as these have appeared in intern interviews [2](https://www.reddit.com/r/csMajors/comments/1o0sfb8/google_intern_interview)[3](https://www.reddit.com/r/InterviewCoderHQ/comments/1tu8xk8/google_software_engineering_winter_intern).
+2. After arriving at an initial solution, be ready to handle follow‑up constraints that require optimization or alternative approaches [3](https://www.reddit.com/r/InterviewCoderHQ/comments/1tu8xk8/google_software_engineering_winter_intern).
+3. Strengthen system design fundamentals and understand Google’s product ecosystem to demonstrate the “deep understanding of Google’s products and engineering culture” that interviewers look for [7](https://igotanoffer.com/blogs/tech/google-software-engineer-interview).
+4. Review Google’s strict engineering processes, including preparing to present design ideas in a mock design‑review format before coding [7](https://igotanoffer.com/blogs/tech/google-software-engineer-interview).
+5. Simulate the two‑phone‑interview format by doing mock technical phone screens with a peer, focusing on clear communication and problem‑solving under time pressure [1](https://medium.com/dfangshuo/my-google-interview-part-i-d3ff034d2fc).
 
 ## 5. Questions to ask the interviewer
-1. Can you describe how the design‑review process works for interns on your team and what level of autonomy they have after approval[1](https://igotanoffer.com/blogs/tech/google-software-engineer-interview)?
-2. What kinds of large‑scale systems or AI projects have recent interns contributed to, especially in relation to Google’s newest models like Gemini 3.5 Flash[6](https://blog.google/innovation-and-ai/technology/ai/google-io-2026-all-our-announcements)[8](https://www.reddit.com/r/FreshersOpportunity/comments/1u81n95/google_internship_2026_software_engineering)?
-3. How does the team collaborate with the AI startup innovation corridor initiatives spanning Southeast Asia and Silicon Valley[5](https://www.googlecloudpresscorner.com/Google-Cloud-Launches-AI-Startup-Innovation-Corridor-from-Southeast-Asia-to-Silicon-Valley-with-EnterpriseSG-Komdigi-NIC-and-SIHUB)?
-4. Given Google’s more cautious engineering processes compared to “move‑fast” environments, how does that influence the day‑to‑day work and decision‑making for interns[1](https://igotanoffer.com/blogs/tech/google-software-engineer-interview).
+No grounded information found for this section.
 
 ## Sources
-1. Google Software Engineer Interview (questions, process, prep) - IGotAnOffer — https://igotanoffer.com/blogs/tech/google-software-engineer-interview
-2. My Google Internship Interview Experience — https://blog.pointblank.club/my-google-internship-interview-experience
-3. Google Intern Interview : r/csMajors — https://www.reddit.com/r/csMajors/comments/1o0sfb8/google_intern_interview
-4. Google | GOOG Stock Price, Company Overview & News — https://www.forbes.com/companies/google
-5. Press Releases — https://www.googlecloudpresscorner.com/Google-Cloud-Launches-AI-Startup-Innovation-Corridor-from-Southeast-Asia-to-Silicon-Valley-with-EnterpriseSG-Komdigi-NIC-and-SIHUB (2026-05-25)
-6. 100 things we announced at I/O 2026 — https://blog.google/innovation-and-ai/technology/ai/google-io-2026-all-our-announcements (2026-05-20)
-7. Google Summer Intern Interview Experience — 2025 — https://medium.com/@venishakalola/google-summer-intern25-interview-experience-6f30de7f9706
+1. Google Internship Interview — Part I — https://medium.com/dfangshuo/my-google-interview-part-i-d3ff034d2fc
+2. Google Intern Interview : r/csMajors — https://www.reddit.com/r/csMajors/comments/1o0sfb8/google_intern_interview
+3. Google Software Engineering Winter Intern Interview Experience 2025 : r/InterviewCoderHQ — https://www.reddit.com/r/InterviewCoderHQ/comments/1tu8xk8/google_software_engineering_winter_intern
+4. Software Engineering, Site Reliability Engineering BS/MS Intern, 2027 — Google Careers — https://www.google.com/about/careers/applications/jobs/results/100028133205254854-software-engineering-site-reliability-engineering-bsms-intern-2027
+5. Welcoming Wiz to Google Cloud: Redefining security for the AI era | Google Cloud Blog — https://cloud.google.com/blog/products/identity-security/google-completes-acquisition-of-wiz (2026-03-11)
+6. I am a former Google Engineering Intern. AmaA : r/IAmA — https://www.reddit.com/r/IAmA/comments/2oe5me/i_am_a_former_google_engineering_intern_amaa
+7. Google Software Engineer Interview (questions, process, prep) - IGotAnOffer — https://igotanoffer.com/blogs/tech/google-software-engineer-interview
 8. Google Internship 2026 – Software Engineering Intern (India) — https://www.reddit.com/r/FreshersOpportunity/comments/1u81n95/google_internship_2026_software_engineering
-9. Software Engineering Intern, Summer 2027 — Google Careers — https://careers.google.com/jobs/results/109864326646375110-software-engineering-intern
 
-_Grounding: 81 facts grounded from 10 sources (12 rejected). Writing: 36 sentences checked, 1 dropped (1 uncited), 3 rewritten (3 candidates-report)._
+_Grounding: 71 facts grounded from 8 sources (5 rejected). Writing: 41 sentences checked, 10 dropped (9 uncited, 1 question-logistics-or-rumor), 9 rewritten (9 candidates-report)._

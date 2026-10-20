@@ -4,7 +4,7 @@ import llm
 
 
 def _fake_provider(name, calls):
-    def fn(model, system_prompt, user_prompt):
+    def fn(model, system_prompt, user_prompt, effort=None):
         calls.append((name, model))
         return "text", 1000, 500
     return fn
@@ -27,7 +27,7 @@ def test_provider_switch(monkeypatch):
     assert calls == [("groq", "openai/gpt-oss-120b"), ("openai", "gpt-4o-mini"), ("openai", "custom-model")]
     line = llm.summary_line()
     assert "provider=openai calls=3 in=3000 tok out=1500 tok" in line
-    assert "by model: openai/gpt-oss-120b 1 calls in=1000 out=500; gpt-4o-mini 1 calls in=1000 out=500; custom-model 1 calls in=1000 out=500" in line
+    assert "by model: openai/gpt-oss-120b 1 calls in=1000 out=500 (effort=medium); gpt-4o-mini 1 calls in=1000 out=500; custom-model 1 calls in=1000 out=500" in line
 
 
 def test_retries_then_clear_error(monkeypatch):
@@ -36,7 +36,7 @@ def test_retries_then_clear_error(monkeypatch):
 
     attempts = []
 
-    def flaky(model, s, u):
+    def flaky(model, s, u, effort=None):
         attempts.append(1)
         raise RateLimitError("429")
 
@@ -58,7 +58,7 @@ def test_truncated_output_is_flagged(capsys):
               usage=NS(prompt_tokens=10, completion_tokens=20))
     client = NS(chat=NS(completions=NS(create=lambda **kw: resp)))
     before = llm.truncation_count()
-    text, _, _ = llm._chat(client, "m", "s", "u")
+    text, *_ = llm._chat(client, "m", "s", "u")
     assert llm.truncation_count() == before + 1
     assert text.startswith("## TL;DR")
     assert "was cut off" in capsys.readouterr().err
@@ -68,7 +68,7 @@ def test_truncated_output_is_flagged(capsys):
 
 def test_extract_and_write_use_different_models_by_default(monkeypatch):
     used = []
-    monkeypatch.setitem(llm._PROVIDERS, "groq", lambda model, s, u: used.append(model) or ("text", 100, 50))
+    monkeypatch.setitem(llm._PROVIDERS, "groq", lambda model, s, u, effort=None: used.append(model) or ("text", 100, 50))
     llm.reset_usage()
     llm.generate("s", "u", task="extract")
     llm.generate("s", "u", task="write")
@@ -140,7 +140,7 @@ def test_format_wait():
 def test_daily_limit_is_not_retried_and_says_how_long_to_wait(monkeypatch):
     attempts = []
 
-    def call(model, s, u):
+    def call(model, s, u, effort=None):
         attempts.append(model)
         raise RateLimitError(TPD)
 
@@ -161,7 +161,7 @@ def test_daily_limit_is_not_retried_and_says_how_long_to_wait(monkeypatch):
 ])
 def test_other_daily_and_quota_limits_are_also_fatal(monkeypatch, message):
     attempts = []
-    monkeypatch.setitem(llm._PROVIDERS, "groq", lambda m, s, u: attempts.append(1) or (_ for _ in ()).throw(RateLimitError(message)))
+    monkeypatch.setitem(llm._PROVIDERS, "groq", lambda m, s, u, effort=None: attempts.append(1) or (_ for _ in ()).throw(RateLimitError(message)))
     with pytest.raises(llm.QuotaExceededError):
         llm.generate("s", "u")
     assert len(attempts) == 1
@@ -169,7 +169,7 @@ def test_other_daily_and_quota_limits_are_also_fatal(monkeypatch, message):
 
 def test_per_minute_limit_retries_and_honours_the_wait_it_is_given(monkeypatch):
     sleeps = []
-    monkeypatch.setitem(llm._PROVIDERS, "groq", lambda m, s, u: (_ for _ in ()).throw(RateLimitError(TPM)))
+    monkeypatch.setitem(llm._PROVIDERS, "groq", lambda m, s, u, effort=None: (_ for _ in ()).throw(RateLimitError(TPM)))
     monkeypatch.setattr(llm, "_sleep", sleeps.append)
     with pytest.raises(llm.LLMError) as err:
         llm.generate("s", "u")
@@ -180,7 +180,7 @@ def test_per_minute_limit_retries_and_honours_the_wait_it_is_given(monkeypatch):
 def test_retry_wait_is_capped(monkeypatch):
     sleeps = []
     slow = TPM.replace("3.5s", "5m")
-    monkeypatch.setitem(llm._PROVIDERS, "groq", lambda m, s, u: (_ for _ in ()).throw(RateLimitError(slow)))
+    monkeypatch.setitem(llm._PROVIDERS, "groq", lambda m, s, u, effort=None: (_ for _ in ()).throw(RateLimitError(slow)))
     monkeypatch.setattr(llm, "_sleep", sleeps.append)
     with pytest.raises(llm.LLMError):
         llm.generate("s", "u")
@@ -191,7 +191,7 @@ def test_bad_key_and_missing_key_are_fatal(monkeypatch):
     class AuthenticationError(Exception):
         pass
 
-    monkeypatch.setitem(llm._PROVIDERS, "groq", lambda m, s, u: (_ for _ in ()).throw(AuthenticationError("401 invalid api key")))
+    monkeypatch.setitem(llm._PROVIDERS, "groq", lambda m, s, u, effort=None: (_ for _ in ()).throw(AuthenticationError("401 invalid api key")))
     with pytest.raises(llm.FatalLLMError, match="rejected the API key"):
         llm.generate("s", "u")
 
@@ -199,3 +199,93 @@ def test_bad_key_and_missing_key_are_fatal(monkeypatch):
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
     with pytest.raises(llm.FatalLLMError, match="GROQ_API_KEY is not set"):
         llm._call_groq("openai/gpt-oss-120b", "s", "u")
+
+
+# ---- reasoning effort ----
+
+def test_default_effort_is_low_for_extraction_and_medium_for_writing_on_groq_gpt_oss():
+    assert llm.get_reasoning_effort("extract", "groq", "openai/gpt-oss-20b") == "low"
+    assert llm.get_reasoning_effort("write", "groq", "openai/gpt-oss-120b") == "medium"
+
+
+def test_effort_env_overrides_blank_means_default_and_junk_is_a_clear_error(monkeypatch):
+    monkeypatch.setenv("EXTRACT_REASONING_EFFORT", "HIGH ")
+    monkeypatch.setenv("WRITE_REASONING_EFFORT", "low")
+    assert llm.get_reasoning_effort("extract", "groq", "openai/gpt-oss-20b") == "high"
+    assert llm.get_reasoning_effort("write", "groq", "openai/gpt-oss-120b") == "low"
+    monkeypatch.setenv("EXTRACT_REASONING_EFFORT", "")
+    assert llm.get_reasoning_effort("extract", "groq", "openai/gpt-oss-20b") == "low"
+    monkeypatch.setenv("EXTRACT_REASONING_EFFORT", "extreme")
+    with pytest.raises(llm.FatalLLMError, match="EXTRACT_REASONING_EFFORT must be one of low, medium, high"):
+        llm.get_reasoning_effort("extract", "groq", "openai/gpt-oss-20b")
+
+
+@pytest.mark.parametrize("provider, model", [
+    ("openai", "gpt-4o-mini"), ("openai", "gpt-oss-20b"), ("groq", "llama-3.3-70b-versatile"), ("groq", "qwen/qwen3-32b"),
+])
+def test_effort_is_ignored_for_other_providers_and_models(monkeypatch, provider, model):
+    monkeypatch.setenv("EXTRACT_REASONING_EFFORT", "high")
+    assert llm.get_reasoning_effort("extract", provider, model) is None
+
+
+def test_generate_passes_the_tasks_effort_to_the_provider(monkeypatch):
+    sent = []
+    monkeypatch.setitem(llm._PROVIDERS, "groq", lambda model, s, u, effort=None: sent.append((model, effort)) or ("t", 1, 1))
+    llm.generate("s", "u", task="extract")
+    llm.generate("s", "u", task="write")
+    monkeypatch.setenv("EXTRACT_REASONING_EFFORT", "medium")
+    llm.generate("s", "u", task="extract")
+    monkeypatch.setenv("EXTRACT_MODEL", "llama-3.3-70b-versatile")  # not a gpt-oss model: nothing is sent
+    llm.generate("s", "u", task="extract")
+    assert sent == [("openai/gpt-oss-20b", "low"), ("openai/gpt-oss-120b", "medium"),
+                    ("openai/gpt-oss-20b", "medium"), ("llama-3.3-70b-versatile", None)]
+
+
+def test_chat_sends_reasoning_effort_only_when_asked_to():
+    from types import SimpleNamespace as NS
+
+    seen = []
+
+    def create(**kw):
+        seen.append(kw)
+        return NS(choices=[NS(finish_reason="stop", message=NS(content="ok"))], usage=NS(prompt_tokens=10, completion_tokens=20))
+
+    client = NS(chat=NS(completions=NS(create=create)))
+    llm._chat(client, "m", "s", "u", "low")
+    llm._chat(client, "m", "s", "u")
+    assert seen[0]["reasoning_effort"] == "low" and "reasoning_effort" not in seen[1]
+
+
+# ---- reasoning tokens in the log ----
+
+def test_reasoning_tokens_are_read_from_usage_and_logged_separately(monkeypatch):
+    from types import SimpleNamespace as NS
+
+    def fake_resp(reasoning):
+        usage = NS(prompt_tokens=100, completion_tokens=900, **({"completion_tokens_details": NS(reasoning_tokens=reasoning)} if reasoning is not None else {}))
+        return NS(choices=[NS(finish_reason="stop", message=NS(content="ok"))], usage=usage)
+
+    client = NS(chat=NS(completions=NS(create=lambda **kw: fake_resp(700))))
+    assert llm._chat(client, "m", "s", "u") == ("ok", 100, 900, 700)
+    client = NS(chat=NS(completions=NS(create=lambda **kw: fake_resp(None))))
+    assert llm._chat(client, "m", "s", "u")[3] is None  # provider didn't say
+
+    results = iter([("t", 1000, 3000, 2500), ("t", 1000, 3000, 2000), ("t", 500, 800, 100)])
+    monkeypatch.setitem(llm._PROVIDERS, "groq", lambda model, s, u, effort=None: next(results))
+    llm.reset_usage()
+    llm.generate("s", "u", task="extract")
+    llm.generate("s", "u", task="extract")
+    llm.generate("s", "u", task="write")
+    line = llm.summary_line()
+    assert "out=6800 tok (of which reasoning=4600)" in line
+    assert "openai/gpt-oss-20b 2 calls in=2000 out=6000 (reasoning=4500, effort=low)" in line
+    assert "openai/gpt-oss-120b 1 calls in=500 out=800 (reasoning=100, effort=medium)" in line
+
+
+def test_no_reasoning_note_when_the_provider_does_not_return_it(monkeypatch):
+    monkeypatch.setitem(llm._PROVIDERS, "groq", lambda model, s, u, effort=None: ("t", 10, 20))
+    monkeypatch.setenv("EXTRACT_MODEL", "llama-3.3-70b-versatile")
+    llm.reset_usage()
+    llm.generate("s", "u", task="extract")
+    line = llm.summary_line()
+    assert "reasoning" not in line and "effort" not in line and "llama-3.3-70b-versatile 1 calls in=10 out=20" in line
