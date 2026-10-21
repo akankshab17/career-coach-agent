@@ -11,7 +11,7 @@ import search
 from helpers import res
 
 TODAY = date(2026, 10, 19)
-NEWS, REDDIT, POSTING = "https://news.example.com/a", "https://www.reddit.com/r/cs/1", "https://acme.com/careers/listing/1"
+NEWS, REDDIT, POSTING = "https://news.example.com/a", "https://www.reddit.com/r/cs/comments/1abc/acme_new_grad_interview", "https://acme.com/careers/listing/1"
 
 helpers_texts = {
     NEWS: "Acme builds payment software for online businesses. Acme acquired Widget Co in March 2026.",
@@ -94,7 +94,7 @@ def test_graph_retries_once_for_a_thin_section_then_writes(world, capsys):
 
     text = result.text
     assert "## 3. What the role really needs\n" in text  # posting found on retry -> not "Inferred"
-    assert "Candidates report that the interview had three rounds [1](https://www.reddit.com/r/cs/1)." in text
+    assert "Candidates report that the interview had three rounds [1](https://www.reddit.com/r/cs/comments/1abc/acme_new_grad_interview)." in text
     assert "5 mock rounds" not in text and "culture" not in text
     assert "2. Review API design basics [2](https://acme.com/careers/listing/1)." in text  # renumbered
     assert "1. Which merchant APIs does the team own [2](https://acme.com/careers/listing/1)?" in text
@@ -344,7 +344,7 @@ def test_cli_location_flag(world, monkeypatch, tmp_path):
 def test_search_more_gets_the_location(world, monkeypatch):
     got = {}
 
-    def search_more(company, role, level, section, known_urls, filtered_out=None, location=None):
+    def search_more(company, role, level, section, known_urls, filtered_out=None, location=None, **kw):
         got["location"] = location
         return []
 
@@ -469,3 +469,21 @@ def test_excluded_postings_are_not_extracted_and_are_listed_in_the_debug_file():
     stats = RunStats()
     stats.excluded.append({"url": "https://acme.com/jobs/1", "title": "PhD Intern", "reason": "requires a location outside United States"})
     assert "# Excluded postings (1)" in stats.debug_report({}) and "PhD Intern" in stats.debug_report({})
+
+
+def test_the_search_lines_say_how_many_forum_results_survived(world, monkeypatch, capsys):
+    def gather(company, role, level, jd, today=None, **kw):
+        return {"company": [res(1, url=NEWS)], "interview": [res(2, url=REDDIT)], "posting": [], "filtered": [],
+                "forum_counts": {"found": 7, "listing": 5, "kept": 1}}
+
+    def more(company, role, level, section, known_urls, filtered_out=None, location=None, forum_out=None):
+        if forum_out is not None and section == "interview":
+            forum_out.update({"found": 4, "listing": 1, "kept": 2})
+        return []
+
+    monkeypatch.setattr(graph, "gather_research", gather)
+    monkeypatch.setattr(graph, "search_more", more)
+    result = graph.run_pipeline("Acme", "Software Engineer", "new-grad", None, today=TODAY)
+    err = capsys.readouterr().err
+    assert "; forum results: 1 of 7 kept (5 listing pages)" in err
+    assert "forum_counts" not in {s["group"] for s in result.sources.values()}  # a log note, not a source group

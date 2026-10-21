@@ -145,6 +145,11 @@ search -> fetch -> extract -> ground -> coverage --enough--> write -> finalize
    glassdoor.* is blocked everywhere (never searched, extracted or cited).
    The same page in two languages (`amazon.jobs/content/en/...` and `/content/pt/...`) is one source: URLs are compared
    without scheme, `www.` and language segments, and the English variant is kept.
+   Forum queries are short (at most 6 words after `site:`): `site:reddit.com <Company> <role> interview` and
+   `site:leetcode.com/discuss <Company> <level> interview` (the follow-up search asks for "interview experience" and LeetCode
+   by role). A 16-word Reddit query returned random subreddit home pages. Forum listing pages (a subreddit's home page, i.e. a
+   Reddit URL without `/comments/`, or a LeetCode discuss index without a post id) are dropped before filtering, and the
+   `[search]` line says how many forum results survived: `forum results: 3 of 10 kept (5 listing pages)`.
    Interview results are filtered for relevance: the company must be in the title or URL, and the role family
    (software, hardware, data, product...) must match, so an HPE post or a "Silicon/FPGA intern" post can't stand in for
    "Google Software Engineering Intern". What was filtered is logged and listed in the debug file. Stripe `/careers/apply/` URLs become `/careers/listing/`; if a posting page

@@ -222,12 +222,17 @@ def test_role_family_detected_from_the_role_text():
 
 
 def test_search_more_reports_filtered_interview_results(monkeypatch):
-    results = [res(1, "Stripe interview", "https://www.reddit.com/r/cs/1"), res(2, "Boeing careers", "https://jobs.boeing.com")]
+    post = "https://www.reddit.com/r/cscareerquestions/comments/1abc/stripe_interview"
+    results = [res(1, "Stripe interview", post), res(2, "Boeing careers", "https://jobs.boeing.com"),
+               res(3, "Stripe subreddit", "https://www.reddit.com/r/stripe")]
     monkeypatch.setattr(search, "search", lambda q, client=None, **kw: results)
-    filtered = []
-    out = search.search_more("Stripe", "Software Engineer", "new-grad", "interview", known_urls=set(), filtered_out=filtered)
-    assert [r["url"] for r in out] == ["https://www.reddit.com/r/cs/1"]
-    assert [(f["url"], f["reason"]) for f in filtered] == [("https://jobs.boeing.com", "other-company")]
+    filtered, forum = [], {}
+    out = search.search_more("Stripe", "Software Engineer", "new-grad", "interview", known_urls=set(), filtered_out=filtered,
+                             forum_out=forum)
+    assert [r["url"] for r in out] == [post]
+    assert [(f["url"], f["reason"]) for f in filtered] == [("https://www.reddit.com/r/stripe", "forum-listing-page"),
+                                                           ("https://jobs.boeing.com", "other-company")]
+    assert forum == {"found": 2, "listing": 1, "kept": 1}
 
 
 # ---- glassdoor is never touched ----
@@ -379,10 +384,11 @@ def test_resolve_posting_focuses_long_pages_too(monkeypatch):
     ("Barista", [], ["product sense", "SQL", "coding"]),
 ])
 def test_interview_queries_use_terms_for_the_role_family(monkeypatch, role, expected, absent):
+    """The general interview query carries the family's words; the forum (site:) queries stay short on purpose."""
     queries = []
     monkeypatch.setattr(search, "search", lambda q, client=None, **kw: queries.append(q) or [])
     search.gather_research("Acme", role, "new-grad", "a jd")
-    interview_queries = [q for q in queries if "interview" in q]
+    interview_queries = [q for q in queries if "interview" in q and not q.startswith("site:")]
     assert interview_queries
     for term in expected:
         assert all(term in q for q in interview_queries), (term, interview_queries)
@@ -392,7 +398,7 @@ def test_interview_queries_use_terms_for_the_role_family(monkeypatch, role, expe
     queries.clear()
     search.search_more("Acme", role, "new-grad", "interview", set())
     for term in expected:
-        assert any(term in q for q in queries)
+        assert any(term in q for q in queries if not q.startswith("site:"))
 
 
 def test_company_careers_pages_are_searched_and_kept_only_if_on_the_company_site(monkeypatch):
@@ -652,3 +658,73 @@ def test_search_more_skips_language_variants_of_known_pages(monkeypatch):
 ])
 def test_explicit_level_only_reports_what_a_title_states(title, url, level):
     assert search.explicit_level(res(1, title, url)) == level
+
+
+# ---- short forum queries; subreddit home pages are not posts ----
+
+CASES = [("Google", "Software Engineering Intern", "intern"), ("Cummins", "Software Engineer", "new-grad"),
+         ("Perplexity", "AI Engineer", "new-grad"), ("Salesforce", "Associate Product Manager", "new-grad"),
+         ("Amazon", "Software Developer", "new-grad")]
+
+
+@pytest.mark.parametrize("company, role, level", CASES)
+@pytest.mark.parametrize("retry", [False, True])
+def test_forum_queries_are_at_most_six_words_after_site(company, role, level, retry):
+    reddit, leetcode = search.forum_queries(company, role, level, retry=retry)
+    assert reddit.startswith(f"site:reddit.com {company} ") and leetcode.startswith(f"site:leetcode.com/discuss {company} ")
+    for q in (reddit, leetcode):
+        assert len(q.split()) - 1 <= search.FORUM_QUERY_WORDS, q
+        assert "interview" in q and "university" not in q and "early career" not in q
+
+
+def test_forum_queries_examples():
+    assert search.forum_queries("Amazon", "Software Developer", "new-grad") == [
+        "site:reddit.com Amazon Software Developer interview", "site:leetcode.com/discuss Amazon new grad interview"]
+    assert search.forum_queries("Google", "Software Engineering Intern", "intern") == [
+        "site:reddit.com Google Software Engineering interview", "site:leetcode.com/discuss Google intern interview"]
+    assert search.forum_queries("Amazon", "Software Developer", "new-grad", retry=True) == [
+        "site:reddit.com Amazon Software Developer interview experience", "site:leetcode.com/discuss Amazon Software Developer interview"]
+    assert search.forum_queries("Acme", "Staff Engineer", "experienced")[1] == "site:leetcode.com/discuss Acme interview"
+    # a long role is cut to fit; the company is never cut
+    assert search.forum_query("reddit.com", "Goldman Sachs", "Summer Analyst Investment Banking Division", "interview experience") == \
+        "site:reddit.com Goldman Sachs Summer Analyst interview experience"
+
+
+def test_role_short_drops_level_words_years_and_parentheses():
+    assert search.role_short("Software Engineering Intern (Summer 2027)") == "Software Engineering"
+    assert search.role_short("New Grad Software Engineer II") == "Software Engineer"
+    assert search.role_short("Associate Product Manager") == "Associate Product Manager"
+    assert search.role_short("Intern") == "Intern"  # nothing left: keep the role as given
+
+
+@pytest.mark.parametrize("url, listing", [
+    ("https://www.reddit.com/r/linux", True),
+    ("https://www.reddit.com/r/cscareerquestions/", True),
+    ("https://old.reddit.com/r/csMajors/top/?t=year", True),
+    ("https://www.reddit.com/r/csMajors/comments/1wd1vge/google_swe_internship_interview_invite", False),
+    ("https://leetcode.com/discuss/interview-question", True),
+    ("https://leetcode.com/discuss/interview-question/6025835/Horrible-experience-at-Salesforce", False),
+    ("https://leetcode.com/discuss/post/1234567/amazon-sde1-oa", False),
+    ("https://medium.com/@x/my-amazon-interview", False),
+])
+def test_forum_listing_pages(url, listing):
+    assert search.is_forum_listing(url) is listing
+
+
+def test_listing_pages_are_dropped_before_filtering_and_counted(monkeypatch):
+    post = res(1, "Amazon SDE new grad interview", "https://www.reddit.com/r/csMajors/comments/1abc/amazon_sde_new_grad_interview")
+    other_post = res(2, "Meta interview", "https://www.reddit.com/r/csMajors/comments/2def/meta_interview")
+    home = res(3, "r/linux", "https://www.reddit.com/r/linux")  # would also fail the company check; it's dropped first
+    guide = res(4, "Amazon SDE interview guide", "https://prep.example.com/amazon-sde")
+    queries = []
+
+    def fake(q, client=None, **kw):
+        queries.append(q)
+        return [post, other_post, home] if q.startswith("site:") else [guide]
+
+    monkeypatch.setattr(search, "search", fake)
+    research = search.gather_research("Amazon", "Software Developer", "new-grad", jd="given", today=date(2026, 10, 21))
+    assert [r["url"] for r in research["interview"]] == [guide["url"], post["url"]]
+    assert [(f["url"], f["reason"]) for f in research["filtered"]] == [(home["url"], "forum-listing-page"), (other_post["url"], "other-company")]
+    assert research["forum_counts"] == {"found": 3, "listing": 1, "kept": 1}
+    assert [q for q in queries if q.startswith("site:")] == search.forum_queries("Amazon", "Software Developer", "new-grad")

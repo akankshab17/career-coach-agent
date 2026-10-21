@@ -9,7 +9,8 @@ The user is learning: build in small steps, explain design decisions, stop after
 ## Pipeline (LangGraph, `src/graph.py`), in order
 `search -> fetch -> extract -> ground -> coverage -> [search_more -> fetch -> extract -> ground -> coverage, once] -> write -> finalize`
 - **search**: Tavily queries (company overview + news, the company's own careers pages (open web + `include_domains` on the
-  company's domain), interview experiences incl. Reddit, the posting). **fetch**: full page text via Tavily extract. **extract**: one LLM call per source (parallel, `EXTRACT_CONCURRENCY` default 4), told the page's purpose
+  company's domain), interview experiences (short `site:reddit.com` / `site:leetcode.com/discuss` queries, <= 6 words after
+  `site:`, listing pages without `/comments/` or a post id dropped; plus one general query), the posting). **fetch**: full page text via Tavily extract. **extract**: one LLM call per source (parallel, `EXTRACT_CONCURRENCY` default 4), told the page's purpose
   (company/role/interview), returns facts as JSON `{fact, exact_quote, section, stage, level, about_company}`. **ground**: code keeps a fact only if its quote is in the page.
   **coverage**: fewer than 2 grounded interview or role facts triggers ONE follow-up search. **write**: one LLM call, grounded
   facts only. **finalize**: code-only checks, citations, rendering. Each step prints a one-line count to stderr.

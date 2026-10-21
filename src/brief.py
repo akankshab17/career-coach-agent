@@ -68,7 +68,7 @@ def collect_sources(research: dict[str, list[dict]], company: str, jd: str | Non
     """Number every search result S1, S2, ... (deduped by URL). The JD, if given, is a source too."""
     sources: dict[str, dict] = {}
     for group, results in research.items():
-        if group != "filtered":  # filtered holds {url, title, reason} notes, not sources
+        if group not in ("filtered", "forum_counts"):  # notes for the run log, not sources
             add_sources(sources, results, group, company)
     if jd:
         add_sources(sources, [{"title": "Job description provided by you", "url": JD_URL, "content": jd,

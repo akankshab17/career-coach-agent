@@ -14,7 +14,7 @@ import search
 ROOT = Path(__file__).resolve().parent.parent
 
 ABOUT = "https://www.acme.com/about"
-REDDIT = "https://www.reddit.com/r/cs/1"
+REDDIT = "https://www.reddit.com/r/cs/comments/1abc/acme_new_grad_interview"
 POSTING = "https://www.acme.com/careers/listing/swe-new-grad"
 
 PAGES = {

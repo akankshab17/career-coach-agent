@@ -243,6 +243,68 @@ def interview_filter_reason(result: dict, company: str, role: str) -> str | None
     return None
 
 
+# Forum queries stay short: "site:reddit.com Amazon Software Developer new grad university graduate early career coding
+# data structures system design interview process questions" (16 words) returned r/linux, r/AO3 and "Prove your humanity".
+FORUM_QUERY_WORDS = 6  # words after the site: operator
+FORUM_LEVEL_WORDS = {"intern": "intern", "new-grad": "new grad", "experienced": ""}
+ROLE_NOISE = {"intern", "internship", "interns", "new", "grad", "graduate", "graduates", "university", "early", "career",
+              "entry", "level", "junior", "summer", "fall", "spring", "winter", "i", "ii", "iii", "iv", "and", "the", "of"}
+
+
+def role_short(role: str) -> str:
+    """The role without level words, years or parentheses: 'Software Engineering Intern (Summer 2027)' -> 'Software Engineering'."""
+    words = re.findall(r"[A-Za-z][A-Za-z+#.&-]*", re.sub(r"\([^)]*\)", " ", role))
+    return " ".join(w for w in words if w.lower() not in ROLE_NOISE) or role
+
+
+def forum_query(site: str, company: str, middle: str, tail: str = "interview") -> str:
+    """'site:<site> <company> <middle> <tail>' with at most FORUM_QUERY_WORDS words after site: (the middle is cut first)."""
+    room = FORUM_QUERY_WORDS - len(company.split()) - len(tail.split())
+    words = middle.split()[:max(room, 0)]
+    return " ".join([f"site:{site}", company, *words, tail])
+
+
+def forum_queries(company: str, role: str, level: str, retry: bool = False) -> list[str]:
+    """Reddit + LeetCode discuss queries. The retry asks differently (experience reports; LeetCode by role) to find new posts."""
+    short = role_short(role)
+    if retry:
+        return [forum_query("reddit.com", company, short, "interview experience"), forum_query("leetcode.com/discuss", company, short)]
+    return [forum_query("reddit.com", company, short), forum_query("leetcode.com/discuss", company, FORUM_LEVEL_WORDS[level])]
+
+
+def is_forum_listing(url: str) -> bool:
+    """A forum page that lists posts instead of being one: a subreddit's home page (no /comments/ in the URL), a LeetCode
+    discuss index (no post id)."""
+    host, path = _host(url), urlparse(url).path
+    if _host_in(host, ("reddit.com",)):
+        return "/comments/" not in path
+    if _host_in(host, ("leetcode.com",)) and path.startswith("/discuss"):
+        return not re.search(r"/\d{3,}(?:/|$)", path)
+    return False
+
+
+def drop_forum_listings(results: list[dict]) -> tuple[list[dict], list[dict]]:
+    """(kept, dropped) where dropped entries are {url, title, reason} like filter_interview's."""
+    kept = [r for r in results if not is_forum_listing(r["url"])]
+    dropped = [{"url": r["url"], "title": r["title"], "reason": "forum-listing-page"} for r in results if is_forum_listing(r["url"])]
+    return kept, dropped
+
+
+def forum_counts(found: list[dict], kept: list[dict], company: str) -> dict:
+    """How many forum results came back, how many were listing pages, how many survived every filter."""
+    forum = [r for r in found if source_kind(r["url"], company) == "forum"]
+    return {"found": len(forum), "listing": sum(is_forum_listing(r["url"]) for r in forum),
+            "kept": sum(source_kind(r["url"], company) == "forum" for r in kept)}
+
+
+def interview_search(forum_results: list[dict], other_results: list[dict], company: str, role: str) -> tuple[list[dict], list[dict], dict]:
+    """Dedupe, drop forum listing pages, filter for relevance. Returns (kept, filtered, forum counts)."""
+    found = _dedupe(forum_results + other_results)
+    candidates, listings = drop_forum_listings(found)
+    kept, filtered = filter_interview(candidates, company, role)
+    return kept, listings + filtered, forum_counts(found, kept, company)
+
+
 def filter_interview(results: list[dict], company: str, role: str) -> tuple[list[dict], list[dict]]:
     """(kept, filtered) where filtered entries are {url, title, reason}."""
     kept, filtered = [], []
@@ -659,11 +721,9 @@ def gather_research(company: str, role: str, level: str, jd: str | None, today: 
     careers_results = [r for r in search(f"{company} careers {terms} {role} program how to apply", exclude_domains=EXCLUDE_DOMAINS)
                        if source_kind(r["url"], company) == "company"]
     careers_results += search_company_careers(company, role, level, company_sites([r["url"] for r in company_results], company))
-    interview_results = (
-        search(f"site:reddit.com {company} {role} {terms} {family_terms} interview process questions")
-        + search(f"{company} {role} {terms} {family_terms} interview process common questions", exclude_domains=EXCLUDE_DOMAINS)
-    )
-    interview_kept, interview_filtered = filter_interview(_dedupe(interview_results), company, role)
+    forum_results = [r for q in forum_queries(company, role, level) for r in search(q)]
+    other_results = search(f"{company} {role} {terms} {family_terms} interview process common questions", exclude_domains=EXCLUDE_DOMAINS)
+    interview_kept, interview_filtered, forum = interview_search(forum_results, other_results, company, role)
     research = {
         "careers": _dedupe(careers_results),  # first, so a page found twice is filed here, not under company news
         # pages whose title names the company first (stable): only the top FULL_TEXT_COMPANY are fetched, and a story that
@@ -672,6 +732,7 @@ def gather_research(company: str, role: str, level: str, jd: str | None, today: 
         "interview": rank(interview_kept, company),
         "posting": [],
         "filtered": interview_filtered,  # not a source group: reported in the run log and debug file
+        "forum_counts": forum,  # not a source group either: {found, listing, kept} for the run log
     }
     if not jd:
         postings = search(f"{company} {role} {terms} job posting {location}", max_results=POSTING_RESULTS)
@@ -681,19 +742,21 @@ def gather_research(company: str, role: str, level: str, jd: str | None, today: 
 
 
 def search_more(company: str, role: str, level: str, section: str, known_urls: set[str],
-                filtered_out: list[dict] | None = None, location: str = DEFAULT_LOCATION) -> list[dict]:
+                filtered_out: list[dict] | None = None, location: str = DEFAULT_LOCATION,
+                forum_out: dict | None = None) -> list[dict]:
     """Targeted second-round search for a section that came up short. Returns only unseen results.
 
-    Interview results that are irrelevant are appended to `filtered_out` (if given) instead of returned.
+    Interview results that are irrelevant are appended to `filtered_out` (if given) instead of returned; the forum counts
+    ({found, listing, kept}) are written into `forum_out` (if given).
     """
     terms = LEVEL_QUERY_TERMS[level]
     if section == "interview":
-        results = (
-            search(f"site:reddit.com {company} {role} {terms} {interview_terms(role)} interview experience rounds")
-            + search(f"site:leetcode.com {company} {role} interview experience")
-            + search(f"{company} {role} {terms} {interview_terms(role)} interview questions what to expect", exclude_domains=EXCLUDE_DOMAINS)
-        )
-        results, filtered = filter_interview(_dedupe(results), company, role)
+        forum_results = [r for q in forum_queries(company, role, level, retry=True) for r in search(q)]
+        other_results = search(f"{company} {role} {terms} {interview_terms(role)} interview questions what to expect",
+                               exclude_domains=EXCLUDE_DOMAINS)
+        results, filtered, forum = interview_search(forum_results, other_results, company, role)
+        if forum_out is not None:
+            forum_out.update(forum)
         if filtered_out is not None:
             filtered_out += [f for f in filtered if f["url"] not in known_urls]
     elif section == "role":

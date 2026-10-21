@@ -80,6 +80,13 @@ def _filtered_note(filtered: list[dict]) -> str:
     return f"; filtered {len(filtered)} irrelevant interview results ({', '.join(f'{n} {r}' for r, n in reasons.items())})"
 
 
+def _forum_note(counts: dict | None) -> str:
+    """'; forum results: 3 of 10 kept (5 listing pages)': how many forum posts made it past the filters."""
+    if not counts:
+        return ""
+    return f"; forum results: {counts['kept']} of {counts['found']} kept ({counts['listing']} listing pages)"
+
+
 def _section_counts(facts: list[dict]) -> Counter:
     return Counter(f["section"] for f in facts)
 
@@ -95,7 +102,7 @@ def search_node(state: BriefState) -> dict:
     stats.filtered += research.get("filtered", [])
     groups = Counter(s["group"] for s in sources.values())
     _log(stats, f"[search] {len(sources)} sources ({', '.join(f'{g} {n}' for g, n in groups.items())})"
-                + _filtered_note(stats.filtered))
+                + _forum_note(research.get("forum_counts")) + _filtered_note(stats.filtered))
     return {"sources": sources, "extracted": [], "facts": [], "retry_used": False, "location_done": False}
 
 
@@ -264,16 +271,16 @@ def route_after_coverage(state: BriefState) -> str:
 def search_more_node(state: BriefState) -> dict:
     stats, sources = state["stats"], state["sources"]
     known = {s["url"] for s in sources.values()}
-    added = []
+    added, forum = [], {}
     for section in state["lacking"]:
         results = search_more(state["company"], state["role"], state["level"], section, known, filtered_out=stats.filtered,
-                              location=state["location"])
+                              location=state["location"], forum_out=forum)
         new_ids = add_sources(sources, results, section, state["company"])
         known |= {sources[sid]["url"] for sid in new_ids}
         added.append(f"{section} +{len(new_ids)}")
     stats.retry_sections = list(state["lacking"])
     stats.sources_total = len(sources)
-    _log(stats, f"[search_more] new sources: {', '.join(added)}" + _filtered_note(stats.filtered))
+    _log(stats, f"[search_more] new sources: {', '.join(added)}" + _forum_note(forum) + _filtered_note(stats.filtered))
     return {"sources": sources, "retry_used": True}
 
 
