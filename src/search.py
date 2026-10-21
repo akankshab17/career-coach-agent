@@ -19,6 +19,7 @@ RECENT_DAYS = 365
 FULL_TEXT_COMPANY = 3  # company sources fetched in full; every interview/forum/posting source is fetched
 EXTRACT_BATCH = 20  # Tavily extract takes at most 20 URLs per call
 FULL_TEXT_CHARS = 6000  # what one extraction prompt sees of a page, chosen by relevance (see focus_text)
+MIN_FOCUS_SCORE = 3.0  # a window that scores less than this isn't evidence of anything; use the head
 SHORT_BLOCK = 80  # blocks shorter than this (menu entries, headings) are weak evidence of content
 MAX_PAGE_CHARS = 80000  # how much of a cleaned page is kept before choosing the relevant part
 MIN_POSTING_CHARS = 500  # extracted posting text shorter than this is treated as a failed extract
@@ -241,10 +242,45 @@ LEVEL_FOCUS = {"intern": ("intern", "internship", "summer"), "new-grad": ("new g
                "experienced": ("senior", "years of experience")}
 
 
-def focus_keywords(company: str, role: str, level: str) -> list[str]:
-    """Words that mark the useful part of a page for this company/role/level (company name excluded: it's everywhere)."""
+# What a page is *for* decides which part of it matters. A news story about an acquisition has nothing to say about
+# "program" or "eligibility"; a careers page has nothing to say about "headquartered". Scoring every page by
+# role/interview words made long company pages lose their company content.
+COMPANY_FOCUS = ("founded", "headquarter", "product", "acquire", "acquisition", "customer", "ceo", "chief executive", "mission",
+                 "employee", "revenue", "launch", "announce", "partner", "platform", "service", "offers", "provides", "business",
+                 "industry", "market", "global", "investor", "valuation", "funding", "company")
+INTERVIEW_FOCUS = ("interview", "round", "onsite", "on-site", "phone screen", "screen", "assessment", "oa", "coding", "question",
+                   "offer", "recruiter", "technical", "behavioral", "system design", "hirevue", "case", "leetcode", "whiteboard",
+                   "take-home", "hiring manager", "loop", "prepare", "experience")
+PURPOSES = ("company", "role", "interview")
+
+
+def focus_keywords(company: str, role: str, level: str, purpose: str = "role") -> list[str]:
+    """Words that mark the useful part of a page for its purpose: 'role' (careers pages, postings: the role, level and
+    application words), 'company' (news and about pages: the company's name and business), 'interview' (guides and
+    forum posts: process words plus the role)."""
     role_words = [w for w in re.findall(r"[a-z]+", role.lower()) if len(w) > 2]
+    if purpose == "company":
+        return list(dict.fromkeys([company.lower()] + list(COMPANY_FOCUS)))
+    if purpose == "interview":
+        return list(dict.fromkeys(list(INTERVIEW_FOCUS) + role_words + list(LEVEL_FOCUS[level])))
     return list(dict.fromkeys(role_words + list(LEVEL_FOCUS[level]) + list(GENERIC_FOCUS)))
+
+
+def focus_map(company: str, role: str, level: str) -> dict[str, list[str]]:
+    return {p: focus_keywords(company, role, level, p) for p in PURPOSES}
+
+
+def purpose_of(source: dict, company: str = "") -> str:
+    """Why this page is in the brief: 'role' (the company's careers pages, postings), 'interview' (interview guides and
+    forum posts), or 'company' (about pages and news)."""
+    if source.get("official") and source.get("type") != "news" and (source.get("group") in ("careers", "posting", "role") or
+                                                                       is_careers_page(source["url"], company, source.get("group", ""))):
+        return "role"
+    if source.get("group") in ("posting", "role", "careers"):
+        return "role"
+    if source.get("group") == "interview" or source.get("kind") in ("forum", "blog"):
+        return "interview"
+    return "company"
 
 
 def focus_text(text: str, keywords: list[str] | None, limit: int = FULL_TEXT_CHARS) -> str:
@@ -259,12 +295,12 @@ def focus_text(text: str, keywords: list[str] | None, limit: int = FULL_TEXT_CHA
     if not keywords:
         return text[:limit]
     blocks = [b for b in re.split(r"\n\s*\n", text) if b.strip()]
-    pats = [re.compile(re.escape(k), re.I) for k in keywords]
+    pats = [re.compile(rf"\b{re.escape(k)}\b" if len(k) <= 3 else re.escape(k), re.I) for k in keywords]  # "oa" must not match "road"
     hits = [min(sum(len(p.findall(b)) for p in pats), 12) for b in blocks]
     # Menu items and headings are short; real content is prose. Short blocks score nothing, however many keywords they
     # contain ("Products", "Product Manager" in a menu) and however many there are; long ones score their hits plus a
-    # prose bonus. (Headings next to good prose still come along, because the window is contiguous.)
-    scores = [0.0 if len(b) < SHORT_BLOCK else h + (1.5 if len(b) >= 150 else 0) for h, b in zip(hits, blocks)]
+    # prose bonus (only if they have a hit at all: prose without the keywords is no evidence of content). (Headings next to good prose still come along, because the window is contiguous.)
+    scores = [0.0 if len(b) < SHORT_BLOCK or not h else h + (1.5 if len(b) >= 150 else 0) for h, b in zip(hits, blocks)]
     sizes = [len(b) + 2 for b in blocks]
     best, best_range, lo, window, total = 0.0, None, 0, 0, 0.0
     for hi in range(len(blocks)):  # the contiguous run of blocks, within `limit`, with the highest total score
@@ -276,7 +312,7 @@ def focus_text(text: str, keywords: list[str] | None, limit: int = FULL_TEXT_CHA
             lo += 1
         if total > best:
             best, best_range = total, (lo, hi + 1)
-    if best_range is None:  # nothing on the page looks like content: keep the head
+    if best_range is None or best < MIN_FOCUS_SCORE:  # no clear signal about where the content is: keep the head
         return text[:limit]
     first = next(i for i in range(*best_range) if scores[i] > 0)  # shrink to the scoring core...
     last = max(i for i in range(*best_range) if scores[i] > 0) + 1
@@ -326,14 +362,20 @@ def extract(urls: list[str], client: TavilyClient | None = None) -> dict[str, st
     return texts
 
 
-def _fit(text: str, focus: list[str] | None) -> str:
+def _fit(text: str, focus: list[str] | dict[str, list[str]] | None, source: dict | None = None, company: str = "") -> str:
+    """What the extractor reads of a page: all of it if it fits, otherwise the part that matches the page's purpose."""
+    if len(text) <= FULL_TEXT_CHARS:
+        return text
+    if isinstance(focus, dict):
+        focus = focus.get(purpose_of(source, company) if source else "role")
     return focus_text(text, focus) if focus else text[:FULL_TEXT_CHARS]
 
 
-def fetch_full_text(sources: dict[str, dict], focus: list[str] | None = None) -> tuple[int, int]:
+def fetch_full_text(sources: dict[str, dict], focus: list[str] | dict[str, list[str]] | None = None, company: str = "") -> tuple[int, int]:
     """Attach `full_text` (in place) to every careers/interview/forum/posting source and the top company sources.
 
-    `focus` (see focus_keywords) picks the relevant FULL_TEXT_CHARS of long pages; without it the page head is used.
+    A page that fits in FULL_TEXT_CHARS is kept whole. For a longer one, `focus` (a keyword list, or the {purpose: list}
+    map from focus_map) picks the relevant FULL_TEXT_CHARS; without it the page head is used.
     Returns (fetched, failed). Sources that already have text (the posting, a JD) are left alone.
     """
     company_ids = [sid for sid, s in sources.items() if s.get("group") == "company"][:FULL_TEXT_COMPANY]
@@ -346,7 +388,7 @@ def fetch_full_text(sources: dict[str, dict], focus: list[str] | None = None) ->
     for sid in wanted:
         sources[sid]["fetch_attempted"] = True
         if sources[sid]["url"] in texts:
-            sources[sid]["full_text"] = _fit(texts[sources[sid]["url"]], focus)
+            sources[sid]["full_text"] = _fit(texts[sources[sid]["url"]], focus, sources[sid], company)
     fetched = sum(sources[sid]["url"] in texts for sid in wanted)
     return fetched, len(wanted) - fetched
 
@@ -394,7 +436,8 @@ def posting_location_class(result: dict, location: str | None) -> str:
 def rank_postings(results: list[dict], company: str, role: str, level: str, location: str | None = None) -> list[dict]:
     """Keep only postings at the requested level, best first. With a location: postings in it come first,
     unknown ones next, and postings from another country are dropped whenever one in the location exists."""
-    candidates = [{**r, "location_class": posting_location_class(r, location)} for r in results if classify_level(r) == level]
+    candidates = [{**r, "location_class": posting_location_class(r, location)} for r in results
+                  if classify_level(r) == level and not looks_like_job_list(r["url"], r["title"])]
     if location and any(c["location_class"] == MATCH for c in candidates):
         candidates = [c for c in candidates if c["location_class"] != OTHER]
     role_words = [w for w in re.findall(r"[a-z]+", role.lower()) if len(w) > 2]
@@ -408,6 +451,29 @@ def rank_postings(results: list[dict], company: str, role: str, level: str, loca
 
     by_score = sorted(candidates, key=score, reverse=True)  # stable: ties keep search relevance order
     return sorted(by_score, key=lambda r: RANK[r["location_class"]]) if location else by_score
+
+
+JOB_LIST_HOSTS = ("github.com", "gitlab.com", "githubusercontent.com", "gist.github.com")
+JOB_LIST_TITLE_RE = re.compile(
+    r"\bjobs?\s+(?:in|near|at|for|list|board|tracker|repo)\b|"  # "Jobs in New York, NY", "Glynn Capital Job Board"
+    r"\b(?:open|current|available|all|latest)\s+(?:jobs|positions|openings|roles|opportunities)\b|"
+    r"\b(?:internship|internships|openings?)\s+(?:list|board|repo|tracker)\b|"
+    r"\blist of\b|\btop \d+\b|\b\d[\d,]*\+?\s+(?:jobs|roles|openings|positions)\b|\bhiring now\b", re.I)
+JOB_LIST_MARKER_RE = re.compile(
+    r"\b(?:easy apply|apply now|save job|show more jobs|(?:posted|updated)\s+\d+\s+(?:hours?|days?|weeks?|months?)\s+ago|\d[\d,]*\s+(?:jobs|results|openings) found)\b",
+    re.I)
+JOB_LIST_MARKERS = 3  # this many "Apply now"/"Posted 2 days ago" lines on one page means a list of jobs
+
+
+def looks_like_job_list(url: str, title: str = "", text: str | None = None) -> bool:
+    """True for pages that list many jobs (a GitHub repo of postings, "Jobs in New York" aggregator pages, results pages).
+    A posting must describe ONE job."""
+    host = _host(url)
+    if _host_in(host, JOB_LIST_HOSTS):
+        return True
+    if JOB_LIST_TITLE_RE.search(title) or re.search(r"[-/]jobs-(?:in|near|at)[-/]|/jobs/search|/job-search|/jobs/?$", url, re.I):
+        return True
+    return text is not None and len(JOB_LIST_MARKER_RE.findall(text)) >= JOB_LIST_MARKERS
 
 
 def pick_posting(results: list[dict], company: str, role: str, level: str, location: str | None = None) -> list[dict]:
@@ -434,6 +500,9 @@ def resolve_posting(candidates: list[dict], location: str | None = None, focus: 
         text = _fit(extract([url]).get(url, ""), focus)
         if len(text.strip()) < MIN_POSTING_CHARS:
             print(f"[search] posting text from {url} missing or under {MIN_POSTING_CHARS} chars; trying next result", file=sys.stderr)
+            continue
+        if looks_like_job_list(url, cand.get("title", ""), text):
+            print(f"[search] {url} lists many jobs instead of describing one; skipping it", file=sys.stderr)
             continue
         cls = classify_location(text, location) if location else MATCH
         posting = {**cand, "url": url, "full_text": text, "location_class": cls}

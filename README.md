@@ -74,10 +74,15 @@ search -> fetch -> extract -> ground -> coverage --enough--> write -> finalize
    Every source is tagged with a type: `official-posting`, `company-site`, `third-party-guide`, `job-aggregator`,
    `forum/blog` or `news`.
 2. **fetch**: full page text (Tavily extract) for the posting, every interview/forum source, and the top 3 company sources.
-   Link/image markup is stripped, then the most relevant 6,000 chars of a long page are kept (not the first 6,000): career
-   pages open with thousands of chars of site menu, and the real content comes after it. Blocks of prose are scored by
-   role/level/process keywords; menu entries and headings score nothing.
+   Link/image markup is stripped. A page that fits in 6,000 chars is passed whole. For a longer one, the most relevant
+   6,000 chars are kept (not the first 6,000: career pages open with thousands of chars of site menu). Relevance depends on
+   what the page is *for*: careers pages and postings are scored with role/level/application words, news and about pages
+   with company words (the company's name, founded, headquarters, products, acquired, customers, CEO...), interview guides
+   and forum posts with process words (interview, round, onsite, assessment...). Menu entries and headings score nothing,
+   and a page with no clear signal keeps its head.
    Pages that can't be fetched (Reddit, usually) fall back to their search snippet, which is still real source text.
+   A posting must describe one job: GitHub repos of postings, "Jobs in New York" / "Job Board" / "Open Positions" pages and
+   results pages full of "Apply now / Posted 2 days ago" lines are rejected (by title/URL, or by their text once fetched).
    glassdoor.* is blocked everywhere (never searched, extracted or cited).
    Interview results are filtered for relevance: the company must be in the title or URL, and the role family
    (software, hardware, data, product...) must match, so an HPE post or a "Silicon/FPGA intern" post can't stand in for

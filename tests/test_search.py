@@ -410,3 +410,135 @@ def test_company_careers_pages_are_searched_and_kept_only_if_on_the_company_site
     research = search.gather_research("Acme", "Associate Product Manager", "new-grad", "a jd")
     assert [r["url"] for r in research["careers"]] == ["https://www.acme.com/company/careers/university/new-grads"]
     assert list(research)[0] == "careers"  # first, so a page found twice is filed under careers, not company news
+
+
+# ---- focus by purpose (the regression: company pages were scored with role words and lost their company content) ----
+
+def _paras(text: str, n: int) -> str:
+    return "\n\n".join([text] * n)  # n paragraphs, like a real page
+
+
+COMPANY_TOP = _paras("Acme was founded in 1919 in Columbus, Indiana, and is headquartered there today. The company designs, manufactures "
+                     "and services engines and power products for customers in more than 190 countries, and its CEO leads a global business. ", 12)
+NEUTRAL = _paras("The weather in the region was mild that quarter and the cafeteria menu changed twice during the month of March, "
+                 "while the parking lot was repainted over two long weekends. ", 40)
+CAREERS_FOOTER = _paras("Join our program: apply for the early career role, check eligibility and qualifications, read the requirements and "
+                        "responsibilities, and submit your application before the deadline. Mentors support every new graduate. ", 20)
+COMPANY_PAGE = COMPANY_TOP + "\n\n" + NEUTRAL + "\n\n" + CAREERS_FOOTER
+assert len(COMPANY_PAGE) > 2 * search.FULL_TEXT_CHARS, len(COMPANY_PAGE)
+
+
+def test_company_pages_are_scored_with_company_words_not_role_words():
+    role_kw = search.focus_keywords("Acme", "Associate Product Manager", "new-grad")
+    company_kw = search.focus_keywords("Acme", "Associate Product Manager", "new-grad", "company")
+    assert "founded" in company_kw and "headquarter" in company_kw and "acquire" in company_kw and "ceo" in company_kw and "acme" in company_kw
+    assert "apply" not in company_kw and "interview" not in company_kw
+
+    wrong = search.focus_text(COMPANY_PAGE, role_kw)
+    assert "founded in 1919" not in wrong  # the bug: the window moved to the careers footer
+    right = search.focus_text(COMPANY_PAGE, company_kw)
+    assert "founded in 1919" in right and "headquartered" in right and len(right) <= search.FULL_TEXT_CHARS
+
+
+def test_each_source_is_focused_by_its_purpose(monkeypatch):
+    other = "xx " * 20  # keeps the other pages short enough to be passed whole
+    pages = {"https://acme.com/about": COMPANY_PAGE, "https://acme.com/company/careers/university/apm": COMPANY_PAGE,
+             "https://www.reddit.com/r/x/1": COMPANY_PAGE}
+    monkeypatch.setattr(search, "extract", lambda urls, client=None: {u: pages[u] for u in urls})
+    research = {"company": [res(1, url="https://acme.com/about")], "careers": [res(2, url="https://acme.com/company/careers/university/apm")],
+                "interview": [res(3, url="https://www.reddit.com/r/x/1")]}
+    sources = collect_sources(research, "Acme")
+    search.fetch_full_text(sources, focus=search.focus_map("Acme", "Associate Product Manager", "new-grad"), company="Acme")
+    by_url = {s["url"]: s["full_text"] for s in sources.values()}
+    assert "founded in 1919" in by_url["https://acme.com/about"]  # company purpose -> company content
+    assert "founded in 1919" not in by_url["https://acme.com/company/careers/university/apm"]  # role purpose -> the careers part
+    assert "eligibility" in by_url["https://acme.com/company/careers/university/apm"]
+
+
+def test_purpose_of_a_source():
+    mk = lambda **kw: {"url": "https://acme.com/x", "group": "company", "kind": "other", **kw}  # noqa: E731
+    assert search.purpose_of(mk(group="company")) == "company"
+    assert search.purpose_of(mk(group="company", type="news")) == "company"
+    assert search.purpose_of(mk(group="careers", official=True, type="company-site")) == "role"
+    assert search.purpose_of(mk(group="posting", official=False, type="job-aggregator")) == "role"
+    assert search.purpose_of(mk(group="interview", kind="other")) == "interview"
+    assert search.purpose_of(mk(group="company", kind="forum")) == "interview"
+    assert search.purpose_of({"url": "https://www.acme.com/company/careers/university/apm", "group": "company", "kind": "company",
+                              "official": True, "type": "company-site"}, "Acme") == "role"  # a careers page found by the overview query
+
+
+def test_pages_that_fit_are_passed_whole_whatever_they_contain(monkeypatch):
+    page = MENU[:2500] + CONTENT  # menu first, but under the cap: nothing is selected away
+    assert len(page) <= search.FULL_TEXT_CHARS
+    assert search.focus_text(page, KEYWORDS) == page
+    monkeypatch.setattr(search, "extract", lambda urls, client=None: {u: page for u in urls})
+    sources = collect_sources({"company": [res(1, url="https://acme.com/about")], "careers": [res(2, url="https://acme.com/careers/apm")]}, "Acme")
+    search.fetch_full_text(sources, focus=search.focus_map("Acme", "APM", "new-grad"), company="Acme")
+    assert all(s["full_text"] == page for s in sources.values())
+    assert search._fit(page, KEYWORDS) == page and search._fit(page, None) == page
+
+
+def test_a_page_with_no_clear_content_signal_keeps_its_head():
+    page = ("Lorem ipsum dolor sit amet, consectetur adipiscing elit. " * 3 + "\n\n") * 80  # prose, but nothing about the keywords
+    assert search.focus_text(page, KEYWORDS) == page[:search.FULL_TEXT_CHARS]
+
+
+def test_short_keywords_match_whole_words_only():
+    road = "The road to Boston goes past the boat dock and the goal line, then the loan office. " * 4 + "\n\n"
+    page = road * 60  # nothing relevant: 'oa' must not fire inside road/boat/goal/loan
+    kw = ["oa", "round"]
+    assert search.focus_text(page, kw) == page[:search.FULL_TEXT_CHARS]
+    real = page + "The OA was one coding question and the phone screen came next, then four rounds of interviews with engineers. " * 3
+    assert "The OA was one coding question" in search.focus_text(real, kw)
+
+
+# ---- job lists are not postings ----
+
+@pytest.mark.parametrize("url, title, expected", [
+    ("https://github.com/SimplifyJobs/New-Grad-Positions", "SimplifyJobs/New-Grad-Positions: 2026 New Grad roles", True),
+    ("https://raw.githubusercontent.com/x/y/main/README.md", "README", True),
+    ("https://jobright.ai/jobs/early-career,-associate-product-manager-(2026)-jobs-in-new-york,-ny",
+     "Early Career, Associate Product Manager (2026) Jobs in New York, NY", True),
+    ("https://jobs.glynncapital.com/companies/stripe/jobs/1", "Software Engineer, New Grad @ Stripe | Glynn Capital Job Board", True),
+    ("https://acme.com/careers/open", "Open Positions | Acme", True),
+    ("https://www.indeed.com/jobs?q=apm&l=ny", "APM jobs", False),  # title alone says nothing; the page text will
+    ("https://stripe.com/careers/listing/software-engineer-money-movement/7208537", "Software Engineer, Money Movement - Stripe Careers", False),
+    ("https://careers.salesforce.com/en/jobs/jr1234/associate-product-manager/", "Associate Product Manager – Salesforce Careers", False),
+    ("https://boards.greenhouse.io/acme/jobs/123", "Associate Product Manager", False),
+])
+def test_job_list_pages_are_recognised_from_url_and_title(url, title, expected):
+    assert search.looks_like_job_list(url, title) is expected
+
+
+def test_job_list_pages_are_recognised_from_their_text():
+    listing = "Associate Product Manager\nEasy Apply\nPosted 2 days ago\nProduct Analyst\nApply now\nPosted 5 days ago\n" * 2
+    single = "Associate Product Manager. Own a product area and partner with engineers. " * 10 + "Apply now to join the team."
+    assert search.looks_like_job_list("https://example.com/search", "Results", listing)
+    assert not search.looks_like_job_list("https://example.com/job/1", "Associate Product Manager", single)  # one 'apply now' is fine
+    assert search.looks_like_job_list("https://example.com/s", "r", "37 jobs found. " + listing[:80])
+
+
+def posting(n, title, url, content=""):
+    return res(n, title, url, content=content or f"snippet {n}")
+
+
+def test_job_lists_never_become_the_posting(monkeypatch, capsys):
+    github = posting(1, "New Grad Positions 2026", "https://github.com/SimplifyJobs/New-Grad-Positions", "New grad software roles in Seattle, WA")
+    board = posting(2, "Software Engineer, New Grad Jobs in Seattle, WA", "https://example.com/jobs-in-seattle", "New grad roles in Seattle, WA")
+    single = posting(3, "Software Engineer, New Grad", "https://acme.com/careers/listing/swe-new-grad", "New grad role in Seattle, WA")
+    ranked = search.rank_postings([github, board, single], "Acme", "Software Engineer", "new-grad", "United States")
+    assert [r["url"] for r in ranked] == [single["url"]]
+    assert search.rank_postings([github, board], "Acme", "Software Engineer", "new-grad", "United States") == []  # no posting beats a list
+
+    # a list that only shows itself once fetched is skipped too
+    listing_text = ("Software Engineer\nEasy Apply\nPosted 2 days ago\n" * 6) + "x " * 300
+    pages = {"https://acme.com/search": listing_text, "https://acme.com/careers/listing/2": "One job: build APIs in Seattle, WA. " * 30}
+    monkeypatch.setattr(search, "extract", lambda urls, client=None: {u: pages[u] for u in urls})
+    out = search.resolve_posting([res(1, "Software Engineer", "https://acme.com/search"), res(2, "Software Engineer", "https://acme.com/careers/listing/2")], "United States")
+    assert out[0]["url"] == "https://acme.com/careers/listing/2"
+    assert "lists many jobs instead of describing one" in capsys.readouterr().err
+
+
+def test_gitignore_keeps_eval_outputs_and_debug_files_out_of_the_repo():
+    ignored = open(".gitignore").read().split()
+    assert "eval_*.md" in ignored and "*.debug.md" in ignored

@@ -5,3 +5,5 @@ __pycache__/
 examples/
 *.debug.md
 .cache/
+eval_*.md
+test*.md
