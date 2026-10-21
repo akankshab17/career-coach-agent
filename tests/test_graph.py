@@ -455,3 +455,12 @@ def test_without_any_official_text_section_3_says_so_and_labels_its_facts(world,
     assert s3.startswith("What the role really needs (Inferred, not from a JD)")
     assert "No official posting text found; based on job aggregator." in s3
     assert "You will own a defined area of a product (job aggregator)" in s3
+
+
+def test_excluded_postings_are_not_extracted_and_are_listed_in_the_debug_file():
+    from brief import RunStats
+
+    assert not graph._extractable({"url": "u", "content": "snippet", "group": "careers", "excluded": "requires a location outside US"})
+    stats = RunStats()
+    stats.excluded.append({"url": "https://acme.com/jobs/1", "title": "PhD Intern", "reason": "requires a location outside United States"})
+    assert "# Excluded postings (1)" in stats.debug_report({}) and "PhD Intern" in stats.debug_report({})

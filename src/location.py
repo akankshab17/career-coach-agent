@@ -104,6 +104,34 @@ def classify_location(text: str, wanted: str | None) -> str:
     return MATCH if hits.get(want, 0) == top else OTHER
 
 
+# "requires that you are located in the UK", "must be based in London", "candidates must reside in Canada".
+LOCATION_REQUIREMENT_RE = re.compile(
+    r"\b(?:must|required to|requires? that you|need to|needs to|will need to|have to)\s+(?:be\s+|are\s+)?"
+    r"(?:located|based|resid(?:e|ing|ent)|liv(?:e|ing)|relocate)\s+(?:in|to|within)\s+(?:the\s+)?([^.;:\n]{2,60})", re.I)
+
+
+def _countries_in(span: str) -> set[str]:
+    found = set(country_hits(span))
+    found |= {country for alias, country in COUNTRY_SYNONYMS.items() if _alias_re(alias).search(span)}
+    if US_CITY_STATE_RE.search(span):
+        found.add("united states")
+    return found
+
+
+def required_location_elsewhere(text: str, wanted: str | None) -> str | None:
+    """The sentence fragment if the posting REQUIRES the candidate to be somewhere outside `wanted` ("Participation requires
+    that you are located in the UK"), else None. A page can list US offices in its footer and still be a UK-only internship,
+    so this is checked on its own, not through classify_location. Only countries are understood (not "EMEA")."""
+    want = canonical_country(wanted) if wanted else None
+    if not want:
+        return None
+    for m in LOCATION_REQUIREMENT_RE.finditer(text):
+        countries = _countries_in(m.group(1))
+        if countries and want not in countries:
+            return m.group(0).strip()
+    return None
+
+
 def find_location(text: str, wanted: str | None) -> dict | None:
     """Where the posting says the job is: {place, quote, class} or None. `quote` is verbatim from `text`."""
     line = LOCATION_LINE_RE.search(text[:SCAN_CHARS * 3])

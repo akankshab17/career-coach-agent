@@ -57,10 +57,14 @@ python src/main.py --company "Stripe" --role "Backend Engineer" --jd "$(cat jd.t
 pytest
 ```
 
-`--level` is `intern`, `new-grad` or `experienced`; the default is `new-grad`. Postings at other levels are ignored.
+`--level` is `intern`, `new-grad` or `experienced`; the default is `new-grad`. Postings at other levels are ignored
+(a title with "Engineer I", "Associate" or "Entry Level" counts as new-grad). A posting must be the company's own: the company
+is in its title or URL, or the search snippet has an employer line ("Company: Cummins").
 `--location` (default `United States`) picks where the job should be: postings in it are preferred, and a posting from
 another country is never used when one in the location exists. Section 3 opens with the posting's location (read from the
-page by code; marked "outside <location>" if it's elsewhere).
+page by code; marked "outside <location>" if it's elsewhere). A posting whose text requires you to be somewhere else
+("requires that you are located in the UK") is rejected, even if the page also lists offices in your location; it is listed
+under "Excluded postings" in the debug file.
 
 ## How it works: extract, then write
 The pipeline is a LangGraph graph (`src/graph.py`):
@@ -76,7 +80,8 @@ search -> fetch -> extract -> ground -> coverage --enough--> write -> finalize
    interview", "case interview"; data: "SQL", "case study"; software: "coding", "system design"; ...), not just coding terms.
    Every source is tagged with a type: `official-posting`, `company-site`, `third-party-guide`, `job-aggregator`,
    `forum/blog` or `news`.
-2. **fetch**: full page text (Tavily extract) for the posting, every interview/forum source, and the top 3 company sources.
+2. **fetch**: full page text (Tavily extract) for the posting, every interview/forum source, and the top 3 company sources
+   (pages whose title names the company first, so a story that mentions it in passing doesn't take a slot).
    Link/image markup is stripped. A page that fits in 6,000 chars is passed whole. For a longer one, the most relevant
    6,000 chars are kept (not the first 6,000: career pages open with thousands of chars of site menu). Relevance depends on
    what the page is *for*: careers pages and postings are scored with role/level/application words, news and about pages

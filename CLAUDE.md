@@ -50,7 +50,9 @@ The user is learning: build in small steps, explain design decisions, stop after
 - **Source types**: `official-posting | company-site | third-party-guide | job-aggregator | forum/blog | news`. Official = JD, company posting,
   or careers page. No official text -> section 3 says so and labels each fact by source type. Official sources' facts are sent first.
 - **Location/level**: postings in `--location` are preferred, another country's posting is never used if one in the location exists;
-  postings at other levels ignored. Interview facts carry the level their source describes; matching levels preferred, others labelled.
+  a posting whose text REQUIRES another country ("must be located in the UK") is excluded (`location.required_location_elsewhere`);
+  postings at other levels ignored ("Engineer I"/"Associate"/"Entry Level" = new-grad). A posting must belong to the company (title,
+  URL, or an employer line in the snippet): Siemens once stood in for Cummins. Company fetch slots go to pages whose title names the company. Interview facts carry the level their source describes; matching levels preferred, others labelled.
 - **Page focus by purpose**: pages <= 6000 chars go whole. Longer ones: keep the 6000 most relevant chars, scored with keywords for the
   page's purpose (company pages: company words; careers/postings: role words; interview pages: process words). Career pages open with
   thousands of chars of menu, so taking the head gave the extractor only the menu. Reddit usually can't be fetched: the search

@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 
 from tavily import TavilyClient
 
-from location import DEFAULT_LOCATION, MATCH, OTHER, RANK, classify_location, find_location
+from location import DEFAULT_LOCATION, MATCH, OTHER, RANK, classify_location, find_location, required_location_elsewhere
 
 MAX_RESULTS = 5
 POSTING_RESULTS = 10  # fetch more postings so there's a good chance one matches the level
@@ -215,6 +215,25 @@ def matches_role_family(result: dict, role: str) -> bool:
     return top < MIN_FAMILY_HITS or body[want] >= top
 
 
+def title_names_company(result: dict, company: str) -> bool:
+    """The title (not just the URL) names the company: a page about it, not one that mentions it in passing."""
+    slug = _slug(company)
+    return bool(slug) and slug in re.sub(r"[^a-z0-9]", "", result["title"].lower())
+
+
+EMPLOYER_LINE_RE = r"(?:company|employer|hiring (?:company|organi[sz]ation)|organi[sz]ation)\s*[:|]\s*\**\s*"
+
+
+def posting_belongs_to(result: dict, company: str) -> bool:
+    """A posting must be the company's own job: the company is in the title or URL (which covers ATS links like
+    jobs.ashbyhq.com/Perplexity), or the snippet has an employer line ("Company: Cummins"). Siemens' early-career page
+    once became Cummins' posting because only the level was checked."""
+    if mentions_company(result, company):
+        return True
+    words = re.escape(company.strip()).replace(r"\ ", r"\s+")
+    return bool(company.strip()) and bool(re.search(EMPLOYER_LINE_RE + words + r"\b", result.get("content") or "", re.I))
+
+
 def interview_filter_reason(result: dict, company: str, role: str) -> str | None:
     """Why an interview result is irrelevant (None = keep it)."""
     if not mentions_company(result, company):
@@ -371,11 +390,17 @@ def _fit(text: str, focus: list[str] | dict[str, list[str]] | None, source: dict
     return focus_text(text, focus) if focus else text[:FULL_TEXT_CHARS]
 
 
-def fetch_full_text(sources: dict[str, dict], focus: list[str] | dict[str, list[str]] | None = None, company: str = "") -> tuple[int, int]:
+def is_posting(source: dict) -> bool:
+    return source.get("group") in ("posting", "role") or source.get("type") == "official-posting"
+
+
+def fetch_full_text(sources: dict[str, dict], focus: list[str] | dict[str, list[str]] | None = None, company: str = "",
+                    location: str | None = None) -> tuple[int, int]:
     """Attach `full_text` (in place) to every careers/interview/forum/posting source and the top company sources.
 
     A page that fits in FULL_TEXT_CHARS is kept whole. For a longer one, `focus` (a keyword list, or the {purpose: list}
     map from focus_map) picks the relevant FULL_TEXT_CHARS; without it the page head is used.
+    A posting whose text requires the candidate to be outside `location` gets no text and an `excluded` reason instead.
     Returns (fetched, failed). Sources that already have text (the posting, a JD) are left alone.
     """
     company_ids = [sid for sid, s in sources.items() if s.get("group") == "company"][:FULL_TEXT_COMPANY]
@@ -388,7 +413,11 @@ def fetch_full_text(sources: dict[str, dict], focus: list[str] | dict[str, list[
     for sid in wanted:
         sources[sid]["fetch_attempted"] = True
         if sources[sid]["url"] in texts:
-            sources[sid]["full_text"] = _fit(texts[sources[sid]["url"]], focus, sources[sid], company)
+            text = texts[sources[sid]["url"]]
+            if is_posting(sources[sid]) and (req := required_location_elsewhere(text, location)):
+                sources[sid]["excluded"] = f"requires a location outside {location}: \"{req}\""
+                continue
+            sources[sid]["full_text"] = _fit(text, focus, sources[sid], company)
     fetched = sum(sources[sid]["url"] in texts for sid in wanted)
     return fetched, len(wanted) - fetched
 
@@ -423,7 +452,12 @@ def classify_level(result: dict) -> str:
     text = f"{result['title']} {result['url']}".lower()
     if re.search(r"\bintern(ship)?s?\b", text):  # \b so "Internal Systems" doesn't match
         return "intern"
-    if re.search(r"new[ -]?grad|university[ -]grad|early[ -]career|graduate", text):
+    if re.search(r"new[ -]?grad|university[ -]grad|early[ -]career|graduate|entry[ -_]?level", text):
+        return "new-grad"
+    if re.search(r"\b(?:engineer|developer|analyst|scientist)[\s_-]+(?:i|1)\b", text):  # "Software Engineer I" (not II/III)
+        return "new-grad"
+    if re.search(r"\bassociate\b(?![\s_-]+(?:director|vice|vp|partner|principal|general))", text) and not re.search(
+            r"\b(?:senior|sr)\b", text):  # "Associate Product Manager", not "Associate Director" / "Senior Associate"
         return "new-grad"
     return "experienced"
 
@@ -434,10 +468,10 @@ def posting_location_class(result: dict, location: str | None) -> str:
 
 
 def rank_postings(results: list[dict], company: str, role: str, level: str, location: str | None = None) -> list[dict]:
-    """Keep only postings at the requested level, best first. With a location: postings in it come first,
-    unknown ones next, and postings from another country are dropped whenever one in the location exists."""
+    """Keep only the company's own postings at the requested level, best first. With a location: postings in it come
+    first, unknown ones next, and postings from another country are dropped whenever one in the location exists."""
     candidates = [{**r, "location_class": posting_location_class(r, location)} for r in results
-                  if classify_level(r) == level and not looks_like_job_list(r["url"], r["title"])]
+                  if classify_level(r) == level and not looks_like_job_list(r["url"], r["title"]) and posting_belongs_to(r, company)]
     if location and any(c["location_class"] == MATCH for c in candidates):
         candidates = [c for c in candidates if c["location_class"] != OTHER]
     role_words = [w for w in re.findall(r"[a-z]+", role.lower()) if len(w) > 2]
@@ -504,6 +538,9 @@ def resolve_posting(candidates: list[dict], location: str | None = None, focus: 
         if looks_like_job_list(url, cand.get("title", ""), text):
             print(f"[search] {url} lists many jobs instead of describing one; skipping it", file=sys.stderr)
             continue
+        if req := required_location_elsewhere(text, location):
+            print(f"[search] posting {url} requires a location outside {location} (\"{req}\"); skipping it", file=sys.stderr)
+            continue
         cls = classify_location(text, location) if location else MATCH
         posting = {**cand, "url": url, "full_text": text, "location_class": cls}
         if cls == MATCH:
@@ -549,7 +586,9 @@ def gather_research(company: str, role: str, level: str, jd: str | None, today: 
     interview_kept, interview_filtered = filter_interview(_dedupe(interview_results), company, role)
     research = {
         "careers": _dedupe(careers_results),  # first, so a page found twice is filed here, not under company news
-        "company": rank(drop_stale(_dedupe(company_results), today), company),
+        # pages whose title names the company first (stable): only the top FULL_TEXT_COMPANY are fetched, and a story that
+        # mentions the company in passing (a DeepMind alum's startup, Mandia's new firm) has nothing to say about it
+        "company": sorted(rank(drop_stale(_dedupe(company_results), today), company), key=lambda r: not title_names_company(r, company)),
         "interview": rank(interview_kept, company),
         "posting": [],
         "filtered": interview_filtered,  # not a source group: reported in the run log and debug file

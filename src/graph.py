@@ -84,9 +84,14 @@ def search_node(state: BriefState) -> dict:
 def fetch_node(state: BriefState) -> dict:
     stats, sources = state["stats"], state["sources"]
     fetched, failed = fetch_full_text(sources, focus=focus_map(state["company"], state["role"], state["level"]),
-                                      company=state["company"])
+                                      company=state["company"], location=state["location"])
+    known = {e["url"] for e in stats.excluded}
+    new = [{"url": s["url"], "title": s.get("title", ""), "reason": s["excluded"]} for s in sources.values()
+           if s.get("excluded") and s["url"] not in known]
+    stats.excluded += new
     stats.sources_with_text = sum(1 for s in sources.values() if s.get("full_text"))
-    _log(stats, f"[fetch] {fetched} pages fetched, {failed} failed; {stats.sources_with_text}/{len(sources)} sources have full text")
+    _log(stats, f"[fetch] {fetched} pages fetched, {failed} failed; {stats.sources_with_text}/{len(sources)} sources have full text"
+                + (f"; excluded {len(new)} posting(s) that require a location outside {state['location']}" if new else ""))
     return {"sources": sources}
 
 
@@ -96,6 +101,8 @@ def _extractable(source: dict) -> bool:
     Company sources outside the top FULL_TEXT_COMPANY were deliberately not fetched; skipping their
     snippets saves an LLM call each.
     """
+    if source.get("excluded"):
+        return False
     if source.get("full_text"):
         return True
     return bool(source.get("content")) and (source.get("group") != "company" or source.get("kind") in ("forum", "blog"))

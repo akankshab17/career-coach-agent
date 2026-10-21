@@ -543,3 +543,45 @@ def test_job_lists_never_become_the_posting(monkeypatch, capsys):
 def test_gitignore_keeps_eval_outputs_and_debug_files_out_of_the_repo():
     ignored = open(".gitignore").read().split()
     assert "eval_*.md" in ignored and "*.debug.md" in ignored
+
+
+# ---- postings must be the company's own; entry-level titles; company pages that name the company first ----
+
+def test_postings_must_belong_to_the_company():
+    siemens = res(1, "Student and early career talent programs | Siemens", "https://www.siemens.com/en-us/company/jobs/early-career-programs")
+    cummins = res(2, "Home | Cummins Early Careers", "https://earlycareers.cummins.jobs")
+    ranked = search.rank_postings([siemens, cummins], "Cummins", "Software Engineer", "new-grad", "United States")
+    assert [r["url"] for r in ranked] == [cummins["url"]]
+    ashby = res(3, "Member of Technical Staff (New Grad)", "https://jobs.ashbyhq.com/Perplexity/5a4c")
+    assert search.posting_belongs_to(ashby, "Perplexity")  # the ATS URL names the company
+    board = res(4, "New Grad Software Engineer", "https://board.example.com/job/9", content="Company: Cummins Inc.\nColumbus, IN")
+    assert search.posting_belongs_to(board, "Cummins")  # the employer line in the snippet
+    assert not search.posting_belongs_to(res(5, "New Grad SWE", "https://board.example.com/job/10",
+                                             content="Great company. Like Cummins, we build engines."), "Cummins")
+
+
+@pytest.mark.parametrize("title,url,level", [
+    ("Cummins Inc. hiring Software Engineer I in Columbus, IN", "https://www.linkedin.com/jobs/view/software-engineer-i-at-cummins-inc-1", "new-grad"),
+    ("Data Analyst 1", "https://x.com/a", "new-grad"),
+    ("Associate Product Manager", "https://x.com/b", "new-grad"),
+    ("Entry Level Software Developer", "https://x.com/c", "new-grad"),
+    ("Software Engineer II", "https://x.com/d", "experienced"),
+    ("Software Engineer in Test", "https://x.com/e", "experienced"),
+    ("Associate Director, Engineering", "https://x.com/f", "experienced"),
+    ("Senior Associate", "https://x.com/g", "experienced"),
+])
+def test_entry_level_titles_count_as_new_grad(title, url, level):
+    assert search.classify_level(res(1, title, url)) == level
+
+
+def test_company_pages_whose_title_names_the_company_are_fetched_first(monkeypatch):
+    results = {
+        "Google company overview": [res(1, "Google | Company Overview", "https://www.forbes.com/companies/google")],
+        "Google recent news funding acquisition product launch": [
+            res(2, "Kevin Mandia's Armadin Raises $255 Million", "https://www.securityweek.com/armadin", published="2026-10-01"),
+            res(3, "Google Acquires AI Music Startup ProducerAI", "https://www.billboard.com/pro/google-acquires-producerai", published="2026-02-24"),
+        ],
+    }
+    monkeypatch.setattr(search, "search", lambda q, client=None, **kw: results.get(q, []))
+    research = search.gather_research("Google", "Software Engineering Intern", "intern", jd="given", today=date(2026, 10, 20))
+    assert [r["url"] for r in research["company"]][-1] == "https://www.securityweek.com/armadin"

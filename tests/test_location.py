@@ -67,9 +67,9 @@ def posting(n, title, url, content=""):
 
 
 def test_postings_in_the_location_come_first_and_other_countries_are_dropped_when_one_exists():
-    china = posting(1, "Software Engineer, New Grad", "https://jobs.example.com/careers/1", "New grad role in Wuhan, China")
-    us = posting(2, "Software Engineer, New Grad", "https://jobs.example.com/careers/2", "New grad role in Seattle, WA")
-    unknown = posting(3, "Software Engineer, New Grad", "https://jobs.example.com/careers/3", "New grad role, great team")
+    china = posting(1, "Software Engineer, New Grad", "https://jobs.acme.com/careers/1", "New grad role in Wuhan, China")
+    us = posting(2, "Software Engineer, New Grad", "https://jobs.acme.com/careers/2", "New grad role in Seattle, WA")
+    unknown = posting(3, "Software Engineer, New Grad", "https://jobs.acme.com/careers/3", "New grad role, great team")
     ranked = search.rank_postings([china, unknown, us], "Acme", "Software Engineer", "new-grad", "United States")
     assert [r["url"] for r in ranked] == [us["url"], unknown["url"]]  # China is dropped: a US posting exists
     assert ranked[0]["location_class"] == "match" and ranked[1]["location_class"] == "unknown"
@@ -128,3 +128,39 @@ def test_source_kind_blogs():
     assert search.source_kind("https://medium.com/@x/my-interview", "Cummins") == "blog"
     assert search.source_kind("https://foo.substack.com/p/1", "Cummins") == "blog"
     assert search.source_kind("https://www.reddit.com/r/x/1", "Cummins") == "forum"
+
+
+# ---- postings that require the candidate to be in another country ----
+
+GOOGLE_UK_PHD = ("Software Engineering PhD Intern 2027\nLondon, UK\n\nMinimum qualifications ... Participation in the internship program "
+                 "requires that you are located in the UK for the duration of the internship program.\n\n"
+                 "Offices: Mountain View, CA; New York, NY; Seattle, WA; Austin, TX.")
+
+
+def test_a_required_location_outside_the_wanted_country_is_detected():
+    assert "located in the UK" in location.required_location_elsewhere(GOOGLE_UK_PHD, "United States")
+    assert location.classify_location(GOOGLE_UK_PHD, "United States") == "match"  # why the page-level check alone missed it
+    assert location.required_location_elsewhere(GOOGLE_UK_PHD, "United Kingdom") is None
+    assert location.required_location_elsewhere("You must be located in the United States to apply.", "United States") is None
+    assert location.required_location_elsewhere("Candidates must reside in Toronto, Canada.", "USA").startswith("must reside in")
+    assert location.required_location_elsewhere("Must be based in the office three days a week.", "United States") is None
+    assert location.required_location_elsewhere("Interns must be located in the UK.", None) is None  # no --location: no check
+
+
+def test_resolve_posting_skips_a_posting_that_requires_another_country(monkeypatch, capsys):
+    us = "Software Engineering Intern\nLocation: Mountain View, CA\n" + "Build things. " * 60
+    pages = {"https://acme.com/jobs/1": GOOGLE_UK_PHD + " Details. " * 60, "https://acme.com/jobs/2": us}
+    monkeypatch.setattr(search, "extract", lambda urls, client=None: {u: pages[u] for u in urls})
+    out = search.resolve_posting([res(1, url="https://acme.com/jobs/1"), res(2, url="https://acme.com/jobs/2")], "United States")
+    assert out[0]["url"] == "https://acme.com/jobs/2"
+    assert "requires a location outside United States" in capsys.readouterr().err
+
+
+def test_fetched_postings_that_require_another_country_get_no_text(monkeypatch):
+    uk_url, guide_url = "https://www.acme.com/careers/jobs/results/1-phd-intern", "https://prep.com/acme-guide"
+    monkeypatch.setattr(search, "extract", lambda urls, client=None: {u: GOOGLE_UK_PHD for u in urls})
+    sources = {"S1": {"url": uk_url, "title": "PhD Intern", "content": "c", "group": "careers", "type": "official-posting"},
+               "S2": {"url": guide_url, "title": "Guide", "content": "c", "group": "interview", "type": "third-party-guide"}}
+    search.fetch_full_text(sources, company="Acme", location="United States")
+    assert "full_text" not in sources["S1"] and "located in the UK" in sources["S1"]["excluded"]
+    assert sources["S2"]["full_text"]  # only postings are checked: a guide may quote anything

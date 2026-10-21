@@ -119,6 +119,7 @@ class RunStats:
     per_source: dict[str, dict] = field(default_factory=dict)  # sid -> url, text kind, extracted/grounded/rejected
     grounded: list[dict] = field(default_factory=list)
     filtered: list[dict] = field(default_factory=list)  # irrelevant interview results: {url, title, reason}
+    excluded: list[dict] = field(default_factory=list)  # fetched postings not used (e.g. require another country): {url, title, reason}
     draft: str = ""  # the writer's raw output, before any checking
     draft_truncated: bool = False
     selected: int = 0
@@ -169,6 +170,9 @@ class RunStats:
         if self.filtered:
             lines += [f"# Filtered interview sources ({len(self.filtered)})", ""]
             lines += [f"- [{f['reason']}] {f['title']} — {f['url']}" for f in self.filtered] + [""]
+        if self.excluded:
+            lines += [f"# Excluded postings ({len(self.excluded)})", ""]
+            lines += [f"- {e['title']} — {e['url']}: {e['reason']}" for e in self.excluded] + [""]
 
         if self.grounded:
             lines += ["# Grounded facts", ""]
