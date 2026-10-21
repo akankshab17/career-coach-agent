@@ -6,6 +6,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date
 
+import guidance
 from facts import HEDGE_WORD_RE, LOWERABLE_STARTERS, NUMBER_RE, REJECT_REASONS, add_hedge
 from search import TYPE_LABEL, is_blocked, is_careers_page, source_kind, source_type
 
@@ -126,6 +127,7 @@ class RunStats:
     checked: int = 0
     drops: list[Drop] = field(default_factory=list)
     rewrites: list[Rewrite] = field(default_factory=list)
+    general_sections: list[str] = field(default_factory=list)  # sections filled with code-written general guidance
 
     def pipeline_line(self) -> str:
         retry = f"yes ({', '.join(self.retry_sections)})" if self.retry_sections else "no"
@@ -170,6 +172,11 @@ class RunStats:
         if self.filtered:
             lines += [f"# Filtered interview sources ({len(self.filtered)})", ""]
             lines += [f"- [{f['reason']}] {f['title']} — {f['url']}" for f in self.filtered] + [""]
+        if self.general_sections:
+            lines += [f"# General guidance used ({len(self.general_sections)})", "",
+                      "No interview or role facts reached the writer, so these sections hold code-written general guidance "
+                      "for the role family (labelled in the brief):", ""]
+            lines += [f"- {s}" for s in self.general_sections] + [""]
         if self.excluded:
             lines += [f"# Excluded postings ({len(self.excluded)})", ""]
             lines += [f"- {e['title']} — {e['url']}: {e['reason']}" for e in self.excluded] + [""]
@@ -674,8 +681,8 @@ def ensure_sections(body: str, s3_heading: str, n_interview_facts: int, n_interv
         lead = [f"- Limited interview data ({n_interview_sources} source{'' if n_interview_sources == 1 else 's'})."]
         if n_interview_facts == 0:
             lead.append(f"- {NO_INTERVIEW}")
-        rest = [l for l in content[0].splitlines()
-                if l.strip() and not _bare(l).startswith("Limited interview data") and _bare(l) != NO_INTERVIEW]
+        rest = [l for l in content[0].splitlines()  # the warning replaces the writer's placeholder, if any
+                if l.strip() and not _bare(l).startswith("Limited interview data") and _bare(l) not in (NO_INTERVIEW, PLACEHOLDER)]
         content[0] = "\n".join(lead + rest)
     if n_interview_facts == 0 and content[2].replace(PLACEHOLDER, "").strip(" \n-*_"):
         content[2] = NO_INTERVIEW + "\n\n" + content[2].replace(PLACEHOLDER, "").strip("\n")  # e.g. only a Timeline came through
@@ -690,6 +697,30 @@ def ensure_sections(body: str, s3_heading: str, n_interview_facts: int, n_interv
         text = text.strip("\n")
         out.append(f"{heading}\n{text if text.strip(' -*_') else PLACEHOLDER}")
     return "\n\n".join(out) + "\n"
+
+
+GENERAL_SECTIONS = {"prep": "## 4. How to prepare", "questions": "## 5. Questions to ask the interviewer"}
+
+
+def general_note(role: str) -> str:
+    return f"Only company information was found; sections 4 and 5 give general guidance for {guidance.family_name(role)}."
+
+
+def add_general_guidance(body: str, role: str, facts: list[dict], stats: RunStats) -> str:
+    """When the writer had no interview or role facts (only company facts), sections 4 and 5 end up as placeholders and the
+    brief has nothing to act on. Fill those placeholders with general guidance for the role family, labelled as such
+    (code-written, uncited, never presented as company data), and say so in the TL;DR. Runs after check_body, so the
+    guidance is not checked for citations."""
+    if any(f["section"] in KEY_SECTIONS and not f.get("pinned") for f in facts):
+        return body
+    for kind, heading in GENERAL_SECTIONS.items():
+        empty = re.compile(rf"(?m)^{re.escape(heading)}\n{re.escape(PLACEHOLDER)}$")
+        if empty.search(body):
+            body = empty.sub(lambda _: f"{heading}\n{guidance.section_text(kind, role)}", body)
+            stats.general_sections.append(heading.removeprefix("## "))
+    if stats.general_sections:
+        body = re.sub(r"(?ms)^(## TL;DR\n.*?)(\n\n## 1\.)", lambda m: f"{m.group(1)}\n- {general_note(role)}{m.group(2)}", body, count=1)
+    return body
 
 
 def render(body: str, facts: list[dict], sources: dict) -> tuple[str, list[dict]]:
@@ -716,6 +747,7 @@ def render(body: str, facts: list[dict], sources: dict) -> tuple[str, list[dict]
 
 def finalize_brief(company, role, level, body: str, facts: list[dict], sources: dict, stats: RunStats) -> BriefResult:
     body = check_body(body, facts, stats, sources, level)
+    body = add_general_guidance(body, role, facts, stats)
     body, cited = render(body, facts, sources)
     lines = []
     for n, s in enumerate(cited, 1):

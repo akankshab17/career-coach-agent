@@ -183,7 +183,7 @@ def test_from_facts_reruns_only_writer_and_finalize(env, monkeypatch):
     brief_text = (env["results"] / run.data["timestamp"] / f"{CASE.name}.md").read_text()
     assert "Acme builds payment software" in brief_text and "## Sources" in brief_text
     # a facts-only run is only compared on writer metrics, and never against full runs' extraction numbers
-    assert run.comparisons == {} or all(row["metric"] in {"dropped", "rewrites", "empty_sections", "fixture_misses", "status"}
+    assert run.comparisons == {} or all(row["metric"] in {"dropped", "rewrites", "empty_sections", "general_sections", "fixture_misses", "status"}
                                         for comp in run.comparisons.values() for rows in comp.values() for row in rows)
 
 
@@ -315,6 +315,10 @@ def test_empty_sections_are_those_with_only_placeholders_and_warnings():
     assert harness.empty_sections(BRIEF) == ["TL;DR", "1. Company overview + recent news", "2. Interview process + common questions",
                                              "4. How to prepare"]
     assert harness.empty_sections("## TL;DR\n- A real bullet [1](u)\n") == []
+    general = ("## TL;DR\n- Limited interview data (0 sources).\n- Only company information was found; sections 4 and 5 give general "
+               "guidance for product management roles.\n## 4. How to prepare\n**General guidance (no company-specific data found)**, "
+               "typical for product management roles:\n- Practise product-sense questions.\n")
+    assert harness.empty_sections(general) == ["TL;DR"]  # the TL;DR note is not content; the guidance is (counted separately)
 
 
 def test_cache_counts_are_summed_over_the_extract_lines():
@@ -336,7 +340,7 @@ def test_usage_totals_cover_every_call(monkeypatch):
 def test_metrics_report_all_requested_numbers(env):
     m = go(env, "record").data["cases"][CASE.name]
     for key in ("sources", "full_text", "facts_company", "facts_interview", "facts_role", "facts_timeline", "grounded", "rejected",
-                "dropped", "rewrites", "empty_sections", "fixture_misses", "latency_s", "tokens_in", "tokens_out", "tokens_reasoning"):
+                "dropped", "rewrites", "empty_sections", "general_sections", "fixture_misses", "latency_s", "tokens_in", "tokens_out", "tokens_reasoning"):
         assert key in m, key
     assert m["full_text"] == 2 and m["sources"] == 3  # the Reddit post could not be fetched
     assert m["cache_hits"] == 0 and m["cache_misses"] >= 3

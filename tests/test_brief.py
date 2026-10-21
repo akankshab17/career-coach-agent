@@ -732,3 +732,45 @@ def test_the_year_allowance_needs_a_dated_source():
     stats = RunStats()
     brief.check_body("## 1. Company overview + recent news\nIn early 2026 Salesforce closed the last mile [F1].\n", facts, stats)
     assert [d.code for d in stats.drops] == ["number-not-in-facts"]
+
+
+# ---- only company facts: general guidance instead of a collapsed brief ----
+
+COMPANY_ONLY = [FACTS[0], FACTS[3]]
+COMPANY_ONLY_DRAFT = ("## TL;DR\nNo grounded information found for this section.\n\n"
+                      "## 1. Company overview + recent news\nStripe builds payments infrastructure [F1].\n\n"
+                      "## 2. Interview process + common questions\nNo grounded information found for this section.\n\n"
+                      "## 3. What the role really needs\nNo grounded information found for this section.\n\n"
+                      "## 4. How to prepare\nNo grounded information found for this section.\n\n"
+                      "## 5. Questions to ask the interviewer\nNo grounded information found for this section.\n")
+
+
+def test_company_only_briefs_get_labelled_general_guidance_for_the_role_family():
+    """Salesforce APM: only company facts survived, and 5 of 6 sections were placeholders."""
+    stats = RunStats()
+    text = brief.finalize_brief("Stripe", "Associate Product Manager", "new-grad", COMPANY_ONLY_DRAFT, COMPANY_ONLY, SOURCES, stats).text
+    prep = text.split("## 4. How to prepare\n")[1].split("\n\n## 5.")[0]
+    questions = text.split("## 5. Questions to ask the interviewer\n")[1].split("\n\n## Sources")[0]
+    for section in (prep, questions):
+        assert section.startswith("**General guidance (no company-specific data found)**, typical for product management roles:")
+        assert section.count("\n- ") >= 3 and "[" not in section  # bullets, no citations: nothing pretends to come from a source
+    assert "product-sense" in prep
+    tldr = text.split("## TL;DR\n")[1].split("\n\n## 1.")[0]
+    assert tldr.splitlines() == ["- Limited interview data (0 sources).", "- No interview reports found.",
+                                 "- Only company information was found; sections 4 and 5 give general guidance for product management roles."]
+    assert brief.PLACEHOLDER not in tldr
+    assert "No grounded information found for this section." in text.split("## 2.")[1].split("## 3.")[0]  # 2 and 3 stay honest
+    assert stats.general_sections == ["4. How to prepare", "5. Questions to ask the interviewer"]
+    assert "# General guidance used (2)" in stats.debug_report()
+
+
+def test_general_guidance_is_not_used_when_interview_or_role_facts_exist():
+    stats = RunStats()
+    text = brief.finalize_brief("Stripe", "Software Engineer", "new-grad", COMPANY_ONLY_DRAFT, FACTS, SOURCES, stats).text
+    assert "General guidance" not in text and stats.general_sections == []
+    assert "## 4. How to prepare\nNo grounded information found for this section." in text
+
+
+def test_a_role_with_no_known_family_gets_generic_guidance():
+    assert "typical for roles like this one" in brief.guidance.section_text("questions", "Chief Happiness Officer")
+    assert "typical for software engineering roles" in brief.guidance.section_text("prep", "Backend Engineer")

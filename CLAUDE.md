@@ -8,8 +8,8 @@ The user is learning: build in small steps, explain design decisions, stop after
 
 ## Pipeline (LangGraph, `src/graph.py`), in order
 `search -> fetch -> extract -> ground -> coverage -> [search_more -> fetch -> extract -> ground -> coverage, once] -> write -> finalize`
-- **search**: Tavily queries (company overview + news, the company's own careers pages, interview experiences incl. Reddit,
-  the posting). **fetch**: full page text via Tavily extract. **extract**: one LLM call per source, told the page's purpose
+- **search**: Tavily queries (company overview + news, the company's own careers pages (open web + `include_domains` on the
+  company's domain), interview experiences incl. Reddit, the posting). **fetch**: full page text via Tavily extract. **extract**: one LLM call per source, told the page's purpose
   (company/role/interview), returns facts as JSON `{fact, exact_quote, section, stage, level, about_company}`. **ground**: code keeps a fact only if its quote is in the page.
   **coverage**: fewer than 2 grounded interview or role facts triggers ONE follow-up search. **write**: one LLM call, grounded
   facts only. **finalize**: code-only checks, citations, rendering. Each step prints a one-line count to stderr.
@@ -21,6 +21,7 @@ The user is learning: build in small steps, explain design decisions, stop after
   job-posting ranking (level, location, rejects job-list pages), page cleaning, `focus_text` page selection, Glassdoor block.
 - `src/location.py` text heuristics: which country a posting is in, the posting's location line.
 - `src/facts.py` extraction prompt (`PROMPT_VERSION`), on-disk cache, `ground()`, hedges, wrong-subject check, location fact.
+- `src/guidance.py` general prep/questions per role family, used only when a brief has no interview or role facts.
 - `src/brief.py` source ids/types, `RunStats` + debug report, writer prompt, `select_for_writing`, `check_body` (all finalize rules),
   citation normalizer, sentence splitter, section enforcement, rendering.
 - `src/llm.py` the ONLY file that knows providers (groq default, openai): model routing, retries, rate-limit classification, usage log,
@@ -38,6 +39,8 @@ The user is learning: build in small steps, explain design decisions, stop after
   rewrites forum interview facts to "Candidates report", keeps hedges ("Reportedly"), labels other-level facts "(full-time process)",
   splits sentences that mix interview stages, keeps timelines out of TL;DR/prep/questions, blocks company news in prep/questions,
   always renders all six sections (placeholder if empty), opens TL;DR with "Limited interview data (N sources)" if < 3 interview facts.
+  With no interview/role facts at all, empty sections 4-5 get code-written general guidance for the role family (`src/guidance.py`),
+  labelled "General guidance (no company-specific data found)": the only uncited text allowed; eval metric `general_sections`.
 - **Model routing.** `EXTRACT_MODEL` (default groq `openai/gpt-oss-20b`: many small calls) vs `WRITE_MODEL` (`openai/gpt-oss-120b`: one call).
   `LLM_MODEL` sets both. **Reasoning effort**: `EXTRACT_REASONING_EFFORT` default low, `WRITE_REASONING_EFFORT` default medium; sent
   to Groq gpt-oss and OpenAI reasoning models (gpt-5*, o*) (hidden reasoning is billed as output tokens). Daily limits (TPD/RPD/quota)

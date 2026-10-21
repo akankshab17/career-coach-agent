@@ -561,6 +561,41 @@ def posting_location(posting: dict, location: str | None) -> dict | None:
     return find_location(text, location) if text else None
 
 
+LEVEL_SHORT_TERMS = {"intern": "internship", "new-grad": "new grad university", "experienced": ""}
+MAX_COMPANY_SITES = 3
+
+
+def _site(host: str) -> str:
+    """'investor.salesforce.com' -> 'salesforce.com', 'jobs.acme.co.uk' -> 'acme.co.uk'."""
+    parts = host.split(".")
+    keep = 3 if len(parts) >= 3 and parts[-2] in ("co", "com", "org", "net", "ac") else 2
+    return ".".join(parts[-keep:])
+
+
+def company_sites(urls, company: str) -> list[str]:
+    """The company's own domains, from URLs already found on them (investor.salesforce.com -> salesforce.com).
+    None found: guess <name>.com (a wrong guess just returns no results)."""
+    sites: list[str] = []
+    for url in urls:
+        if source_kind(url, company) == "company" and (site := _site(_host(url))) not in sites:
+            sites.append(site)
+    return sites[:MAX_COMPANY_SITES] or ([f"{_slug(company)}.com"] if _slug(company) else [])
+
+
+def search_company_careers(company: str, role: str, level: str, sites: list[str], extra: str = "") -> list[dict]:
+    """Careers/program pages on the company's own site(s). The open-web careers query (long, full of level words) can come
+    back with nothing from the company at all: one Salesforce recording returned only Verizon, USAJOBS and job-list pages,
+    so the APM program page never became a source. A short query limited to the company's domains can't drift like that."""
+    if not sites:
+        return []
+    query = " ".join(w for w in (company, role, LEVEL_SHORT_TERMS[level], "careers program", extra) if w)
+    return [r for r in search(query, include_domains=sites)
+            if source_kind(r["url"], company) == "company"
+            and classify_level(r) in (level, "experienced")  # titles can only say "intern"/"new grad"; unmarked pass
+            and (CAREERS_PATH_RE.search(urlparse(r["url"]).path) or JOB_PATH_RE.search(r["url"])
+                 or re.search(r"(?:^|\.)(?:careers?|jobs)\.", _host(r["url"])) or _host(r["url"]).endswith(".jobs"))]
+
+
 def gather_research(company: str, role: str, level: str, jd: str | None, today: date | None = None,
                     location: str = DEFAULT_LOCATION) -> dict[str, list[dict]]:
     """Run every query the brief needs, grouped by topic. The posting is chosen to be in `location`."""
@@ -579,6 +614,7 @@ def gather_research(company: str, role: str, level: str, jd: str | None, today: 
     # The company's own careers/program pages: top-priority sources for the process and role sections.
     careers_results = [r for r in search(f"{company} careers {terms} {role} program how to apply", exclude_domains=EXCLUDE_DOMAINS)
                        if source_kind(r["url"], company) == "company"]
+    careers_results += search_company_careers(company, role, level, company_sites([r["url"] for r in company_results], company))
     interview_results = (
         search(f"site:reddit.com {company} {role} {terms} {family_terms} interview process questions")
         + search(f"{company} {role} {terms} {family_terms} interview process common questions", exclude_domains=EXCLUDE_DOMAINS)
@@ -619,6 +655,8 @@ def search_more(company: str, role: str, level: str, section: str, known_urls: s
     elif section == "role":
         postings = search(f"{company} careers {role} {terms} responsibilities qualifications {location}", max_results=POSTING_RESULTS)
         results = [{**r, "url": normalize_posting_url(r["url"])} for r in rank_postings(postings, company, role, level, location)][:2]
+        own = search_company_careers(company, role, level, company_sites(sorted(known_urls), company), "responsibilities qualifications")
+        results += [r for r in own if r["url"] not in known_urls][:2]
     else:
         raise ValueError(f"no follow-up search for section {section!r}")
     return [r for r in _dedupe(results) if r["url"] not in known_urls]

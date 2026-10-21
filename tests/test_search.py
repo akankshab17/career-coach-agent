@@ -585,3 +585,39 @@ def test_company_pages_whose_title_names_the_company_are_fetched_first(monkeypat
     monkeypatch.setattr(search, "search", lambda q, client=None, **kw: results.get(q, []))
     research = search.gather_research("Google", "Software Engineering Intern", "intern", jd="given", today=date(2026, 10, 20))
     assert [r["url"] for r in research["company"]][-1] == "https://www.securityweek.com/armadin"
+
+
+# ---- careers pages on the company's own domain ----
+
+def test_company_sites_come_from_urls_on_the_company_domain():
+    urls = ["https://investor.salesforce.com/news/1", "https://www.cnbc.com/x", "https://www.salesforce.com/homepage",
+            "https://careers.acme.co.uk/x"]
+    assert search.company_sites(urls, "Salesforce") == ["salesforce.com"]
+    assert search.company_sites(["https://jobs.acme.co.uk/1"], "Acme") == ["acme.co.uk"]
+    assert search.company_sites(["https://www.cnbc.com/x"], "Salesforce") == ["salesforce.com"]  # nothing found: a guess
+
+
+def test_the_careers_search_also_asks_the_company_domain_directly(monkeypatch):
+    """Salesforce APM: the open-web careers query returned nothing from Salesforce, so the APM program page never became a source."""
+    calls = []
+    apm = res(9, "Associate Product Manager Program | Salesforce Careers", "https://www.salesforce.com/company/careers/university/associate-program")
+
+    def fake_search(q, client=None, **kw):
+        calls.append((q, kw))
+        if kw.get("include_domains"):
+            return [apm, res(10, "Salesforce Homepage", "https://www.salesforce.com/homepage"),
+                    res(11, "Summer Internship | Salesforce Careers", "https://www.salesforce.com/company/careers/university/interns")]
+        if "overview" in q:
+            return [res(1, "Salesforce Investor News", "https://investor.salesforce.com/news/1")]
+        return [res(2, "Students & Internships | Verizon Careers", "https://mycareer.verizon.com/early-in-career")]
+
+    monkeypatch.setattr(search, "search", fake_search)
+    research = search.gather_research("Salesforce", "Associate Product Manager", "new-grad", jd="given", today=date(2026, 10, 20))
+    assert [r["url"] for r in research["careers"]] == [apm["url"]]  # not the homepage (not a careers page), not the intern page
+    site_calls = [(q, kw) for q, kw in calls if kw.get("include_domains")]
+    assert site_calls == [("Salesforce Associate Product Manager new grad university careers program", {"include_domains": ["salesforce.com"]})]
+
+    calls.clear()
+    out = search.search_more("Salesforce", "Associate Product Manager", "new-grad", "role", known_urls={"https://investor.salesforce.com/news/1"})
+    assert apm["url"] in [r["url"] for r in out]
+    assert any(kw.get("include_domains") == ["salesforce.com"] for _, kw in calls)

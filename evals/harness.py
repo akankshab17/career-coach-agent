@@ -62,6 +62,7 @@ METRICS: dict[str, tuple[int, str]] = {
     "dropped": (-1, "writer"),
     "rewrites": (-1, "writer"),
     "empty_sections": (-1, "output"),
+    "general_sections": (-1, "output"),  # sections 4/5 filled with general guidance because no interview/role facts existed
     "fixture_misses": (-1, "output"),
     "latency_s": (-1, "perf"),
     "tokens_in": (-1, "perf"),
@@ -71,7 +72,7 @@ METRICS: dict[str, tuple[int, str]] = {
 LABELS = {
     "sources": "sources", "full_text": "full-text pages", "facts_company": "facts: company", "facts_interview": "facts: interview",
     "facts_role": "facts: role", "facts_timeline": "facts: timeline", "grounded": "grounded", "rejected": "rejected",
-    "dropped": "sentences dropped", "rewrites": "rewrites", "empty_sections": "empty sections", "fixture_misses": "fixture misses",
+    "dropped": "sentences dropped", "rewrites": "rewrites", "empty_sections": "empty sections", "general_sections": "general guidance", "fixture_misses": "fixture misses",
     "latency_s": "latency (s)", "tokens_in": "tokens in", "tokens_out": "tokens out", "tokens_reasoning": "of which reasoning",
 }
 WRITER_ONLY_KINDS = {"writer", "output"}  # what can be compared between a facts-only run and a full run
@@ -234,7 +235,7 @@ def facts_payload(case: Case, stats: RunStats, result: brief.BriefResult, record
 
 BOILERPLATE = re.compile(
     r"^(?:-\s*)?(?:" + re.escape(brief.PLACEHOLDER) + r"|" + re.escape(brief.NO_INTERVIEW) + r"|Limited interview data\b.*|"
-    r"No official posting text found\b.*|\*\*[^*]+\*\*)$")
+    r"No official posting text found\b.*|Only company information was found\b.*|\*\*[^*]+\*\*)$")
 
 
 def empty_sections(text: str) -> list[str]:
@@ -270,6 +271,7 @@ def case_metrics(stats: RunStats, text: str, latency: float, usage: dict, misses
         "dropped": len(stats.drops),
         "rewrites": len(stats.rewrites),
         "empty_sections": len(empty),
+        "general_sections": len(stats.general_sections),
         "fixture_misses": misses,
         "latency_s": round(latency, 1),
         "tokens_in": usage["input"],

@@ -97,6 +97,9 @@ search -> fetch -> extract -> ground -> coverage --enough--> write -> finalize
 1. **search**: Tavily search for company news, the company's own careers/program pages, interview experiences (incl. Reddit)
    and the posting at your level. Interview queries add words that fit the role family (product: "product sense", "APM
    interview", "case interview"; data: "SQL", "case study"; software: "coding", "system design"; ...), not just coding terms.
+   Careers pages are also searched on the company's own domain only (Tavily `include_domains`, the domain taken from company
+   pages the overview/news search found, else `<name>.com`), with a short query: the open-web careers query can return
+   nothing from the company at all (one Salesforce recording: Verizon, USAJOBS and job lists), losing the program page.
    Every source is tagged with a type: `official-posting`, `company-site`, `third-party-guide`, `job-aggregator`,
    `forum/blog` or `news`.
 2. **fetch**: full page text (Tavily extract) for the posting, every interview/forum source, and the top 3 company sources
@@ -153,6 +156,10 @@ search -> fetch -> extract -> ground -> coverage --enough--> write -> finalize
    about interview logistics, rumors/unconfirmed news, or based on interview facts; rewrites unattributed forum facts to "Candidates report..."; always renders all six
    sections in order (placeholder if empty, e.g. when the writer's output was cut off); renumbers lists;
    turns `[F3]` into numbered source links and lists only cited sources.
+   **Only company facts?** If no interview or role fact reached the writer, an empty "How to prepare" / "Questions to ask"
+   gets general guidance for the role family (software, product, data, ...; written in `src/guidance.py`, not by the LLM),
+   labelled **General guidance (no company-specific data found)**, and the TL;DR says so. These are the only uncited lines a
+   brief can contain. Sections 2 and 3 keep their placeholders: there is no general version of a company's process.
 
 Each step prints a one-line count to stderr, ending with e.g.
 `[pipeline] sources=18 with_text=14 extracted=96 grounded=61 rejected=35 retry=yes (role)`.
