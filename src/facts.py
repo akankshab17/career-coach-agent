@@ -151,9 +151,12 @@ def extract_facts(source: dict, company: str, role: str, level: str, use_cache: 
         f"URL: {source['url']}\nPublished: {source.get('published_date') or 'unknown'}\n\n"
         f"Page text{' (search snippet only)' if text_kind == 'snippet' else ''}:\n{text}"
     )
+    llm.clear_served()
     facts = parse_facts(llm.generate(EXTRACT_SYSTEM_PROMPT, user, task="extract"))
-    served_by = "/".join(llm.get_settings("extract"))
-    if served_by != model_id:  # this call switched to the fallback model: file its facts under that model, not Groq's
+    # The model that answered THIS call (extractions run in parallel, so another thread may have switched the run to the
+    # fallback meanwhile; get_settings() is only the answer when generate() was replaced, as in tests).
+    served_by = "/".join(llm.served_by() or llm.get_settings("extract"))
+    if served_by != model_id:  # this call went to the fallback model: file its facts under that model, not Groq's
         model_id = served_by
         path = _cache_path(source["url"], company, role, level, text_kind, model_id, text, purpose)
     os.makedirs(CACHE_DIR, exist_ok=True)

@@ -13,6 +13,7 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 from dataclasses import dataclass
 
@@ -90,15 +91,31 @@ class CallRecord:
 
 _calls: list[CallRecord] = []
 _fallback: dict[str, tuple[str, str]] = {}  # task -> (provider, model) it switched to in this run
+# Extraction calls run in parallel threads (graph.extract_node): every read-modify-write of the module state above, the
+# truncation counter and the spend file happens under this lock.
+_lock = threading.RLock()
+_local = threading.local()  # per thread: which (provider, model) served this thread's latest call
 
 
 def reset_fallback() -> None:
     """Start a new run on the primary provider."""
-    _fallback.clear()
+    with _lock:
+        _fallback.clear()
 
 
 def fallback_tasks() -> list[str]:
-    return sorted(_fallback)
+    with _lock:
+        return sorted(_fallback)
+
+
+def clear_served() -> None:
+    _local.served = None
+
+
+def served_by() -> tuple[str, str] | None:
+    """(provider, model) that answered this thread's latest generate() call, or None (e.g. generate was replaced in a test).
+    Other threads may switch the run to the fallback at any moment, so get_settings() after a call can't tell this."""
+    return getattr(_local, "served", None)
 
 
 def primary_settings(task: str = "write") -> tuple[str, str]:
@@ -116,7 +133,8 @@ def get_settings(task: str = "write") -> tuple[str, str]:
     """(provider, model) that the next call for `task` will use: the fallback once this run switched to it, else the
     primary. Model precedence: EXTRACT_MODEL/WRITE_MODEL, then LLM_MODEL, then the default."""
     primary = primary_settings(task)
-    return _fallback.get(task, primary)
+    with _lock:
+        return _fallback.get(task, primary)
 
 
 def fallback_settings(task: str) -> tuple[str, str] | None:
@@ -161,7 +179,8 @@ _truncated = 0  # how many responses so far were cut off by the output-token lim
 
 
 def truncation_count() -> int:
-    return _truncated
+    with _lock:
+        return _truncated
 
 
 def _chat(client, model: str, system_prompt: str, user_prompt: str, reasoning_effort: str | None = None,
@@ -180,7 +199,8 @@ def _chat(client, model: str, system_prompt: str, user_prompt: str, reasoning_ef
     choice = resp.choices[0]
     if choice.finish_reason == "length":
         global _truncated
-        _truncated += 1
+        with _lock:
+            _truncated += 1
         print(f"[llm] WARNING: output hit the {MAX_OUTPUT_TOKENS}-token limit and was cut off", file=sys.stderr)
     details = getattr(resp.usage, "completion_tokens_details", None)
     reasoning = getattr(details, "reasoning_tokens", None)
@@ -277,6 +297,11 @@ def load_spend() -> dict:
 
 
 def _add_spend(cost: float, in_tok: int, out_tok: int) -> dict:
+    with _lock:  # read-modify-write of the file: one thread at a time
+        return _add_spend_locked(cost, in_tok, out_tok)
+
+
+def _add_spend_locked(cost: float, in_tok: int, out_tok: int) -> dict:
     spend = load_spend()
     spend.update(openai_usd=round(spend["openai_usd"] + cost, 6), calls=spend["calls"] + 1,
                  input_tokens=spend["input_tokens"] + in_tok, output_tokens=spend["output_tokens"] + out_tok)
@@ -293,7 +318,9 @@ def _check_budget(provider: str, model: str) -> None:
     if (provider, model) not in PRICES:
         raise FatalLLMError(f"Fallback model openai/{model} has no price in PRICES (src/llm.py), so its spend can't be checked "
                             f"against {BUDGET_ENV}. Add its price or pick another FALLBACK_*_MODEL.")
-    spent, budget = load_spend()["openai_usd"], budget_usd()
+    with _lock:
+        spent = load_spend()["openai_usd"]
+    budget = budget_usd()
     if spent >= budget:
         raise BudgetExceededError(
             f"OpenAI fallback budget used up: ${spent:.2f} spent of {BUDGET_ENV}=${budget:.2f} (tracked in {SPEND_PATH}). "
@@ -305,20 +332,29 @@ def generate(system_prompt: str, user_prompt: str, task: str = "write") -> str:
 
     If Groq raises QuotaExceededError and a fallback is configured, this task switches to the fallback for the rest of
     the run (the call is retried there). Reasoning effort goes to Groq gpt-oss and OpenAI reasoning models; the task's
-    SAMPLING (temperature, seed) to every model that accepts it."""
-    provider, model = get_settings(task)
+    SAMPLING (temperature, seed) to every model that accepts it.
+
+    Thread-safe: parallel calls may hit the daily limit together; one of them switches the task to the fallback (and logs
+    it), the others retry there too. Budget checks are per call, so parallel calls can overshoot the budget by a few calls."""
+    with _lock:
+        provider, model = get_settings(task)
+        on_fallback = _fallback.get(task) == (provider, model)
     try:
-        return _generate_with(provider, model, task, system_prompt, user_prompt, fallback=task in _fallback)
+        return _generate_with(provider, model, task, system_prompt, user_prompt, fallback=on_fallback)
     except QuotaExceededError as exc:
-        if task in _fallback or provider != "groq" or isinstance(exc, BudgetExceededError):
+        if on_fallback or provider != "groq" or isinstance(exc, BudgetExceededError):
             raise
-        target = fallback_settings(task)
-        if target is None or target == (provider, model):
-            raise
-        _check_budget(*target)  # a fallback we can't pay for: fail now, with Groq's message kept
-        _fallback[task] = target
-        print(f"[llm] FALLBACK: {provider}/{model} hit its daily limit; {task} calls now go to {target[0]}/{target[1]} "
-              f"for the rest of this run", file=sys.stderr)
+        with _lock:
+            target, switched = _fallback.get(task), False
+            if target is None:  # first thread to hit the limit: switch the task for everyone
+                target = fallback_settings(task)
+                if target is None or target == (provider, model):
+                    raise
+                _check_budget(*target)  # a fallback we can't pay for: fail now, with Groq's message kept
+                _fallback[task], switched = target, True
+        if switched:
+            print(f"[llm] FALLBACK: {provider}/{model} hit its daily limit; {task} calls now go to {target[0]}/{target[1]} "
+                  f"for the rest of this run", file=sys.stderr)
         return _generate_with(*target, task, system_prompt, user_prompt, fallback=True)
 
 
@@ -356,7 +392,9 @@ def _generate_with(provider: str, model: str, task: str, system_prompt: str, use
 
     price = PRICES.get((provider, model))
     cost = (in_tok * price[0] + out_tok * price[1]) / 1_000_000 if price else None
-    _calls.append(CallRecord(provider, model, in_tok, out_tok, latency, cost, reasoning, effort, task, fallback))
+    with _lock:
+        _calls.append(CallRecord(provider, model, in_tok, out_tok, latency, cost, reasoning, effort, task, fallback))
+    _local.served = (provider, model)
     spend_note = ""
     if provider == "openai" and cost is not None:
         spend = _add_spend(cost, in_tok, out_tok)
@@ -386,13 +424,20 @@ def list_models(provider: str | None = None) -> list[str]:
 
 
 def reset_usage() -> None:
-    _calls.clear()
+    with _lock:
+        _calls.clear()
+
+
+def _snapshot() -> list[CallRecord]:
+    with _lock:
+        return list(_calls)
 
 
 def models_used() -> dict[str, list[str]]:
     """{task: ["provider/model", ...]} over every call since reset_usage(), in first-use order."""
+    calls = _snapshot()
     used: dict[str, list[str]] = {}
-    for c in _calls:
+    for c in calls:
         name = f"{c.provider}/{c.model}"
         if name not in used.setdefault(c.task, []):
             used[c.task].append(name)
@@ -402,15 +447,16 @@ def models_used() -> dict[str, list[str]]:
 def usage_totals() -> dict:
     """Token and time totals over every call since reset_usage() (reasoning tokens counted when the provider reports them),
     plus which provider/model served each task and the dollar cost of the calls with a price."""
+    calls = _snapshot()
     return {
         "models": models_used(),
-        "fallback_calls": sum(c.fallback for c in _calls),
-        "cost": round(sum(c.cost or 0 for c in _calls), 6),
-        "calls": len(_calls),
-        "input": sum(c.input_tokens for c in _calls),
-        "output": sum(c.output_tokens for c in _calls),
-        "reasoning": sum(c.reasoning_tokens or 0 for c in _calls),
-        "latency": sum(c.latency for c in _calls),
+        "fallback_calls": sum(c.fallback for c in calls),
+        "cost": round(sum(c.cost or 0 for c in calls), 6),
+        "calls": len(calls),
+        "input": sum(c.input_tokens for c in calls),
+        "output": sum(c.output_tokens for c in calls),
+        "reasoning": sum(c.reasoning_tokens or 0 for c in calls),
+        "latency": sum(c.latency for c in calls),
     }
 
 
@@ -423,16 +469,17 @@ def _reasoning_total(calls: list[CallRecord]) -> int | None:
 def summary_line() -> str:
     """One-line usage summary over every LLM call since reset_usage(), with tokens per model.
     Reasoning tokens are shown separately when the provider returns them."""
-    if not _calls:
+    all_calls = _snapshot()
+    if not all_calls:
         return "[llm] no calls made"
-    in_tok = sum(c.input_tokens for c in _calls)
-    out_tok = sum(c.output_tokens for c in _calls)
-    latency = sum(c.latency for c in _calls)
-    costs = [c.cost for c in _calls]
+    in_tok = sum(c.input_tokens for c in all_calls)
+    out_tok = sum(c.output_tokens for c in all_calls)
+    latency = sum(c.latency for c in all_calls)
+    costs = [c.cost for c in all_calls]
     cost = "n/a (no price configured)" if None in costs else f"${sum(costs):.4f}"
-    total_reasoning = _reasoning_total(_calls)
+    total_reasoning = _reasoning_total(all_calls)
     by_model: dict[str, list[CallRecord]] = {}
-    for c in _calls:
+    for c in all_calls:
         by_model.setdefault(f"{c.provider}/{c.model}" + (" [FALLBACK]" if c.fallback else ""), []).append(c)
     parts = []
     for model, calls in by_model.items():
@@ -444,13 +491,13 @@ def summary_line() -> str:
         parts.append(f"{model} {len(calls)} calls in={sum(c.input_tokens for c in calls)} "
                      f"out={sum(c.output_tokens for c in calls)}" + (f" ({', '.join(details)})" if details else ""))
     reasoning_note = f" (of which reasoning={total_reasoning})" if total_reasoning is not None else ""
-    providers = "+".join(dict.fromkeys(c.provider for c in _calls))
+    providers = "+".join(dict.fromkeys(c.provider for c in all_calls))
     fallback_note = ""
-    if any(c.fallback for c in _calls):
-        fallback_note = (f" | FALLBACK used for {', '.join(sorted({c.task for c in _calls if c.fallback}))}; "
+    if any(c.fallback for c in all_calls):
+        fallback_note = (f" | FALLBACK used for {', '.join(sorted({c.task for c in all_calls if c.fallback}))}; "
                          f"OpenAI spend so far ${load_spend()['openai_usd']:.2f} of ${budget_usd():.2f}")
     return (
-        f"[llm] provider={providers} calls={len(_calls)} in={in_tok} tok out={out_tok} tok{reasoning_note} "
+        f"[llm] provider={providers} calls={len(all_calls)} in={in_tok} tok out={out_tok} tok{reasoning_note} "
         f"latency={latency:.1f}s est_cost={cost} | by model: {'; '.join(parts)}{fallback_note}"
     )
 

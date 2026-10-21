@@ -79,7 +79,9 @@ def test_graph_retries_once_for_a_thin_section_then_writes(world, capsys):
     err = capsys.readouterr().err
 
     assert world["search_more"] == ["role"]  # interview had 2 grounded facts, role had 0
-    assert world["llm"] == [("extract", NEWS), ("extract", REDDIT), ("extract", POSTING), ("write", None)]
+    # the first extract step calls the LLM for both sources in parallel (any order); then the retry's source, then the writer
+    assert sorted(world["llm"][:2]) == sorted([("extract", NEWS), ("extract", REDDIT)])
+    assert world["llm"][2:] == [("extract", POSTING), ("write", None)]
 
     # one line per step, in order, with the retry visible
     steps = [line.split("]")[0] + "]" for line in err.splitlines() if line.startswith("[")]
@@ -265,7 +267,10 @@ def test_all_extractions_failing_in_the_retry_round_still_writes_from_earlier_fa
     assert len(result.stats.extract_errors) == 1
 
 
-def test_a_bad_key_stops_extraction_after_one_call(world, monkeypatch):
+@pytest.mark.parametrize("concurrency, most_calls", [("1", 1), ("4", 2)])
+def test_a_bad_key_stops_extraction_at_once(world, monkeypatch, concurrency, most_calls):
+    """One at a time: exactly one call. In parallel: calls already started finish (at most one per source here), nothing new starts."""
+    monkeypatch.setenv("EXTRACT_CONCURRENCY", concurrency)
     calls = []
 
     def generate(system, user, task="write"):
@@ -275,7 +280,7 @@ def test_a_bad_key_stops_extraction_after_one_call(world, monkeypatch):
     monkeypatch.setattr(llm, "generate", generate)
     with pytest.raises(llm.FatalLLMError):
         graph.run_pipeline("Acme", "Software Engineer", "new-grad", None, today=TODAY)
-    assert calls == ["extract"]
+    assert 1 <= len(calls) <= most_calls and set(calls) == {"extract"}  # never reached search_more or the writer
 
 
 # ---- location ----

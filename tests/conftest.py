@@ -14,6 +14,6 @@ def isolated(monkeypatch, tmp_path):
     llm.reset_fallback()
     monkeypatch.setattr(main, "load_dotenv", lambda *a, **k: None)  # tests must not read the developer's real .env
     for var in ("LLM_PROVIDER", "LLM_MODEL", "EXTRACT_MODEL", "WRITE_MODEL", "FALLBACK_PROVIDER", "FALLBACK_EXTRACT_MODEL",
-                "FALLBACK_WRITE_MODEL", "OPENAI_BUDGET_USD", "EXTRACT_REASONING_EFFORT", "WRITE_REASONING_EFFORT"):
+                "FALLBACK_WRITE_MODEL", "OPENAI_BUDGET_USD", "EXTRACT_REASONING_EFFORT", "WRITE_REASONING_EFFORT", "EXTRACT_CONCURRENCY"):
         monkeypatch.delenv(var, raising=False)
     helpers.TEXTS.clear()

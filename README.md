@@ -149,7 +149,12 @@ search -> fetch -> extract -> ground -> coverage --enough--> write -> finalize
    (software, hardware, data, product...) must match, so an HPE post or a "Silicon/FPGA intern" post can't stand in for
    "Google Software Engineering Intern". What was filtered is logged and listed in the debug file. Stripe `/careers/apply/` URLs become `/careers/listing/`; if a posting page
    can't be extracted (or is under 500 chars) the next-best posting at your level is tried.
-3. **extract**: one LLM call per source (full page or snippet) returns facts as
+3. **extract**: one LLM call per source (full page or snippet), up to `EXTRACT_CONCURRENCY` (default 4, max 16) at once.
+   Facts are assembled in source order whatever order the calls finish in, so the same input gives the same output (evals
+   stay comparable); the `[extract]` line ends with the wall time, e.g. `... in 14.2s, 4 at a time`. Each call backs off on a
+   per-minute limit as before; a daily limit switches every worker to the fallback (one `FALLBACK:` line), or stops the whole
+   run if none is configured; with calls in parallel the OpenAI budget can be overshot by up to `EXTRACT_CONCURRENCY - 1`
+   calls. Each source's call returns facts as
    `{fact, exact_quote, section, stage, level, about_company}`. `section` is `company`, `interview`, `role` or `timeline`
    (application dates and deadlines, which are not interview content).
    `stage` (interview facts): `oa`, `phone-screen`, `team-screen`, `onsite` or `unknown`.

@@ -6,8 +6,12 @@ search -> fetch -> extract -> ground -> coverage --enough--> write -> finalize
 """
 from __future__ import annotations
 
+import os
 import sys
+import threading
+import time
 from collections import Counter
+from concurrent.futures import CancelledError, ThreadPoolExecutor, as_completed
 from datetime import date
 from typing import TypedDict
 
@@ -23,6 +27,9 @@ from location import DEFAULT_LOCATION
 from search import fetch_full_text, focus_map, gather_research, search_more
 
 MIN_FACTS = 2  # a key section with fewer grounded facts triggers one follow-up search
+CONCURRENCY_ENV = "EXTRACT_CONCURRENCY"
+DEFAULT_CONCURRENCY = 4  # parallel extraction calls (one per source); Groq's per-minute limits make much more pointless
+MAX_CONCURRENCY = 16
 
 
 class PipelineError(llm.LLMError):
@@ -119,23 +126,78 @@ def _extractable(source: dict) -> bool:
     return bool(source.get("content")) and (source.get("group") != "company" or source.get("kind") in ("forum", "blog"))
 
 
+def extract_concurrency() -> int:
+    """EXTRACT_CONCURRENCY from .env: how many sources are extracted at once (default 4, 1 = one at a time)."""
+    raw = (os.getenv(CONCURRENCY_ENV) or "").strip()
+    if not raw:
+        return DEFAULT_CONCURRENCY
+    if not raw.isdigit() or not 1 <= int(raw) <= MAX_CONCURRENCY:
+        raise llm.FatalLLMError(f"{CONCURRENCY_ENV} must be a whole number from 1 to {MAX_CONCURRENCY} (got '{raw}'). "
+                                "Fix it in your .env file.")
+    return int(raw)
+
+
+def extract_parallel(todo: list[str], sources: dict, state: BriefState, workers: int) -> dict[str, tuple | Exception]:
+    """Extract every source in `todo` with up to `workers` calls at once. Returns {sid: (facts, from_cache) or the error}.
+
+    A per-source failure (bad JSON, a call that kept failing) is returned for that source. A FatalLLMError (daily limit
+    with no fallback, budget used up, bad key) stops everything: sources not started yet are skipped, calls in flight
+    finish, then the error is raised. Per-minute limits are retried inside llm.generate; a daily limit with a fallback
+    configured switches all threads to it there."""
+    stop = threading.Event()
+
+    def one(sid: str):
+        if stop.is_set():
+            return None
+        try:
+            return extract_facts(sources[sid], state["company"], state["role"], state["level"], state["use_cache"])
+        except llm.FatalLLMError:
+            stop.set()  # here, not in the main thread: the pool may start the next source before the main thread sees this
+            raise
+
+    results: dict[str, tuple | Exception] = {}
+    fatal: llm.FatalLLMError | None = None
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="extract") as pool:
+        futures = {pool.submit(one, sid): sid for sid in todo}
+        for future in as_completed(futures):
+            try:
+                result = future.result()
+            except CancelledError:
+                continue
+            except llm.FatalLLMError as exc:  # every other call would fail too: stop the whole run
+                fatal = fatal or exc
+                stop.set()
+                for f in futures:
+                    f.cancel()
+                continue
+            except (ValueError, llm.LLMError) as exc:  # one bad source shouldn't sink the run; it's logged
+                result = exc
+            if result is not None:
+                results[futures[future]] = result
+    if fatal:
+        raise fatal
+    return results
+
+
 def extract_node(state: BriefState) -> dict:
     stats, sources = state["stats"], state["sources"]
     todo = [sid for sid, s in sources.items() if sid not in state["extracted"] and _extractable(s)]
+    workers = max(1, min(extract_concurrency(), len(todo)))
+    start = time.perf_counter()
+    results = extract_parallel(todo, sources, state, workers) if todo else {}
+    elapsed = time.perf_counter() - start
     candidates, cached, failed = [], 0, 0
-    for sid in todo:
+    for sid in todo:  # in source order, whatever order the calls finished in: the same input gives the same output
         text, kind = source_text(sources[sid])
         row = stats.per_source.setdefault(sid, {"url": sources[sid]["url"], "text": kind, "chars": len(text),
                                                 "extracted": 0, "grounded": Counter(), "rejected": 0, "error": ""})
-        try:
-            facts, from_cache = extract_facts(sources[sid], state["company"], state["role"], state["level"], state["use_cache"])
-        except llm.FatalLLMError:
-            raise  # daily quota / bad key: every other call would fail too, so stop the whole run
-        except (ValueError, llm.LLMError) as exc:  # one bad source shouldn't sink the run; it's logged
-            stats.extract_errors.append((sources[sid]["url"], str(exc)))
-            row["error"] = str(exc)
+        result = results[sid]
+        if isinstance(result, Exception):
+            stats.extract_errors.append((sources[sid]["url"], str(result)))
+            row["error"] = str(result)
             failed += 1
             continue
+        facts, from_cache = result
         cached += from_cache
         row["extracted"] = len(facts)
         candidates += [{**f, "source_id": sid} for f in facts]
@@ -143,7 +205,8 @@ def extract_node(state: BriefState) -> dict:
     first_error = stats.extract_errors[0][1] if stats.extract_errors else ""
     snippets = sum(1 for sid in todo if not sources[sid].get("full_text"))
     _log(stats, f"[extract] {len(candidates)} candidate facts from {len(todo)} sources ({snippets} snippet-only; "
-                f"{cached} from cache, {len(todo) - cached - failed} via LLM, {failed} failed)")
+                f"{cached} from cache, {len(todo) - cached - failed} via LLM, {failed} failed) "
+                f"in {elapsed:.1f}s, {workers} at a time")
     if todo and failed == len(todo) and not state["facts"]:
         raise PipelineError(
             f"Every fact extraction failed ({failed} of {failed} sources), so there is nothing to build a brief from. "

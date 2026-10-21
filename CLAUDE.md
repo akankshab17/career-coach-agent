@@ -9,7 +9,7 @@ The user is learning: build in small steps, explain design decisions, stop after
 ## Pipeline (LangGraph, `src/graph.py`), in order
 `search -> fetch -> extract -> ground -> coverage -> [search_more -> fetch -> extract -> ground -> coverage, once] -> write -> finalize`
 - **search**: Tavily queries (company overview + news, the company's own careers pages (open web + `include_domains` on the
-  company's domain), interview experiences incl. Reddit, the posting). **fetch**: full page text via Tavily extract. **extract**: one LLM call per source, told the page's purpose
+  company's domain), interview experiences incl. Reddit, the posting). **fetch**: full page text via Tavily extract. **extract**: one LLM call per source (parallel, `EXTRACT_CONCURRENCY` default 4), told the page's purpose
   (company/role/interview), returns facts as JSON `{fact, exact_quote, section, stage, level, about_company}`. **ground**: code keeps a fact only if its quote is in the page.
   **coverage**: fewer than 2 grounded interview or role facts triggers ONE follow-up search. **write**: one LLM call, grounded
   facts only. **finalize**: code-only checks, citations, rendering. Each step prints a one-line count to stderr.
@@ -58,6 +58,12 @@ The user is learning: build in small steps, explain design decisions, stop after
 - **Page purpose in the extraction prompt.** Told only the role, gpt-oss-20b at low effort returned `[]` for company profiles and
   careers pages that never name the role (Cummins: all 5 pages; Google: Forbes). The prompt now says what each page is for.
 - **Writer sampling**: temperature 0 + seed (`SAMPLING` in `llm.py`; best effort on Groq). Extraction stays at 0.2.
+- **Parallel extraction.** `graph.extract_parallel` runs a bounded thread pool; results are assembled in source order, so the
+  same input gives the same candidates/log (only the `in Xs, N at a time` suffix of the [extract] line varies). A per-source
+  error is logged for that source; a `FatalLLMError` (daily limit without fallback, budget, bad key) cancels unstarted
+  sources and stops the run. `llm.py` guards `_calls`, `_fallback`, `_truncated` and the spend file with `_lock`; parallel
+  daily-limit hits switch once and all retry on the fallback. The cache key uses `llm.served_by()` (per thread), never
+  `get_settings()` after a call (another thread may have switched meanwhile). Budget can overshoot by up to N-1 calls.
 - **Extraction cache** (`.cache/extract/`) key = prompt version + extraction model + URL + company/role/level + text kind + page purpose +
   hash of the exact text read. Facts from a fallback call are filed under the model that actually answered. NOT the reasoning effort. Bump `PROMPT_VERSION` only when the extraction prompt changes; a model change or different
   page text already gets a new key. Don't cache by URL alone: an empty result from reading a site menu once stuck forever.
