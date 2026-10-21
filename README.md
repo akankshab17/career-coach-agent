@@ -71,10 +71,39 @@ python src/main.py --company "Stripe" --role "Backend Engineer" --level new-grad
 python src/main.py --company "Stripe" --role "Backend Engineer" --jd "$(cat jd.txt)" -o brief.md
 ```
 
+## Web app
+A FastAPI backend (`src/api.py`) runs the pipeline in the background; a Streamlit front end (`app.py`) talks to it.
+```
+uvicorn --app-dir src --factory api:serve --host 127.0.0.1 --port 8000     # terminal 1: the API (reads .env)
+streamlit run app.py                                                       # terminal 2: the app, at http://localhost:8501
+```
+- **API:** `POST /briefs {company, role, level?, location?, jd?, force?}` returns `{job_id, status, reused}` at once (202).
+  `GET /briefs/{job_id}`: `status` (queued / running / done / failed), the current `step`, the step log lines, and when done
+  `brief_markdown` + `debug_summary` (counts, retry, models/providers, tokens, cost); when failed, `error`.
+  `GET /briefs?limit=20` lists recent briefs, `GET /briefs/{job_id}/debug` returns the full debug report, `GET /health` is open.
+- **One job at a time:** a single background worker takes jobs oldest first (llm.py keeps per-run usage and fallback state in
+  module globals, and the Groq limits are shared anyway). Each job is its own run: usage and the fallback switch reset per job.
+  At most 20 jobs can wait (429 after that).
+- **Jobs live in SQLite** (`.cache/jobs.db`, gitignored). After a restart, queued jobs and jobs that were running when the
+  server stopped run again from the start (the extraction cache makes the repeat cheap).
+- **Reuse:** the same company/role/location (case and spaces ignored), level and JD within 7 days returns the existing job
+  id with `"reused": true` instead of running again; so does an identical job still in progress. `force: true` (the app's
+  "Run again" box) always runs. Failed jobs are never reused.
+- **The app:** a form (company, role, level, location, optional JD), a live progress bar (search -> fetch -> extract -> ground ->
+  write -> finalize, polled every second), the brief with clickable sources, a download button (`.md`), run details, and
+  recent briefs in the sidebar (each one opens via `?job=<id>`). `BRIEF_API_URL` points it at the API (default
+  `http://localhost:8000`).
+- **Access code (`APP_ACCESS_CODE` in `.env`):** if set, every API endpoint except `/health` needs it in the `X-Access-Code`
+  header (401 otherwise) and the app asks for it once per browser session. If unset there is no check, which is only fine
+  on your own machine. Before deploying publicly: set it, serve both over HTTPS (the code travels in a header), and keep the
+  API reachable only where the app can call it. There is no lockout after wrong codes, so use a long random code.
+
 ## Test
 ```
 pytest
 ```
+`tests/test_api.py` covers the API (fake pipeline, temporary database); `tests/test_app.py` drives `app.py` with Streamlit's
+`AppTest` against that API. Neither makes network calls.
 
 `--level` is `intern`, `new-grad` or `experienced`; the default is `new-grad`. Postings at other levels are ignored
 (a title with "Engineer I", "Associate" or "Entry Level" counts as new-grad). A posting must be the company's own: the company
@@ -155,7 +184,7 @@ search -> fetch -> extract -> ground -> coverage --enough--> write -> finalize
    per fact; a TL;DR bullet is trimmed to its first fact); restores the hedge on hedged facts; drops "questions to ask"
    about interview logistics, rumors/unconfirmed news, or based on interview facts; rewrites unattributed forum facts to "Candidates report..."; always renders all six
    sections in order (placeholder if empty, e.g. when the writer's output was cut off); renumbers lists;
-   turns `[F3]` into numbered source links and lists only cited sources.
+   turns `[F3]` into numbered source links and lists only cited sources, each as a `[Title](url)` link.
    **Only company facts?** If no interview or role fact reached the writer, an empty "How to prepare" / "Questions to ask"
    gets general guidance for the role family (software, product, data, ...; written in `src/guidance.py`, not by the LLM),
    labelled **General guidance (no company-specific data found)**, and the TL;DR says so. These are the only uncited lines a

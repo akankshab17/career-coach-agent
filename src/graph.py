@@ -53,6 +53,17 @@ class BriefState(TypedDict, total=False):
 def _log(stats: RunStats, line: str) -> None:
     stats.steps.append(line)
     print(line, file=sys.stderr)
+    if stats.on_progress:
+        stats.on_progress(None, line)
+
+
+def _tracked(name: str, node):
+    """Tell stats.on_progress (if any) that step `name` is starting, then run it."""
+    def run(state: BriefState) -> dict:
+        if state["stats"].on_progress:
+            state["stats"].on_progress(name, None)
+        return node(state)
+    return run
 
 
 def _filtered_note(filtered: list[dict]) -> str:
@@ -231,7 +242,7 @@ def build_graph():
         ("search", search_node), ("fetch", fetch_node), ("extract", extract_node), ("ground", ground_node),
         ("coverage", coverage_node), ("search_more", search_more_node), ("write", write_node), ("finalize", finalize_node),
     ]:
-        g.add_node(name, fn)
+        g.add_node(name, _tracked(name, fn))
     g.add_edge(START, "search")
     g.add_edge("search", "fetch")
     g.add_edge("fetch", "extract")
@@ -246,7 +257,8 @@ def build_graph():
 
 def run_pipeline(company: str, role: str, level: str, jd: str | None, use_cache: bool = True, today: date | None = None,
                  stats: RunStats | None = None, location: str = DEFAULT_LOCATION) -> BriefResult:
-    """Run the graph. Pass `stats` to keep the run log even when the run stops early with an LLMError."""
+    """Run the graph. Pass `stats` to keep the run log even when the run stops early with an LLMError, and set
+    `stats.on_progress` to hear about each step as it starts and each log line as it is written."""
     final = build_graph().invoke({
         "company": company, "role": role, "level": level, "jd": jd,
         "today": today or date.today(), "use_cache": use_cache, "stats": stats or RunStats(), "location": location,

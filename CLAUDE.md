@@ -26,7 +26,12 @@ The user is learning: build in small steps, explain design decisions, stop after
   citation normalizer, sentence splitter, section enforcement, rendering.
 - `src/llm.py` the ONLY file that knows providers (groq default, openai): model routing, retries, rate-limit classification, usage log,
   OpenAI fallback + spend tracking (`.cache/spend.json`).
+- `src/api.py` FastAPI web API (`uvicorn --app-dir src --factory api:serve`): POST/GET /briefs, ONE worker thread (llm.py globals are
+  per-run, so never run two pipelines at once), progress via `RunStats.on_progress` (graph wraps every node), reuse < 7 days,
+  optional `APP_ACCESS_CODE` (X-Access-Code header). `src/jobs.py` SQLite store `.cache/jobs.db` (the table is the queue;
+  `running` rows are re-queued at startup). `app.py` Streamlit client (talks only to the API, `BRIEF_API_URL`).
 - `evals/` eval harness (below). `tests/` pytest; `tests/helpers.py` has the fakes (`fake_llm`, `res`, `fact`).
+  `tests/test_api.py` (TestClient + `fake_runner`), `tests/test_app.py` (Streamlit AppTest routed into the TestClient).
 
 ## Key design decisions (and why)
 - **Extract-then-write.** The first design (write, then LLM-verify) dropped ~58% of sentences: the writer embellished and the
@@ -86,6 +91,7 @@ The user is learning: build in small steps, explain design decisions, stop after
 - Never commit `.env`, eval fixtures, `eval_*.md`, `*.debug.md`. No API keys in fixtures (the harness refuses).
 - For big changes: explain the design first and WAIT for the user's OK. Otherwise do what was asked, then stop so they can test.
 - Don't redo finished work: check the code/tests first. Update README + tests with each behaviour change.
+- Web app: keep `app.py` a thin API client; pipeline changes go in `src/`. Never start a second pipeline thread in the API.
 - Use `git` only as asked; commit messages end with the Co-Authored-By line from the session's attribution reminder.
 
 ## Known limitations

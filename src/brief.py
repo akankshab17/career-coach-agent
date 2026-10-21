@@ -5,6 +5,7 @@ import re
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date
+from typing import Callable
 
 import guidance
 from facts import HEDGE_WORD_RE, LOWERABLE_STARTERS, NUMBER_RE, REJECT_REASONS, add_hedge
@@ -128,6 +129,8 @@ class RunStats:
     drops: list[Drop] = field(default_factory=list)
     rewrites: list[Rewrite] = field(default_factory=list)
     general_sections: list[str] = field(default_factory=list)  # sections filled with code-written general guidance
+    # progress callback (the web app's worker): on_progress(step, None) when a step starts, (None, line) for each log line
+    on_progress: Callable[[str | None, str | None], None] | None = field(default=None, repr=False, compare=False)
 
     def pipeline_line(self) -> str:
         retry = f"yes ({', '.join(self.retry_sections)})" if self.retry_sections else "no"
@@ -755,7 +758,8 @@ def finalize_brief(company, role, level, body: str, facts: list[dict], sources: 
             lines.append(f"{n}. Job description provided by you")
         else:
             date_part = f" ({s['published_date']})" if s.get("published_date") else ""
-            lines.append(f"{n}. {s['title']} — {s['url']}{date_part}")
+            title = re.sub(r"([\[\]])", r"\\\1", s["title"] or s["url"])  # a "]" in a title must not end the link text
+            lines.append(f"{n}. [{title}]({s['url']}){date_part}")
     footer = "\n\n## Sources\n" + ("\n".join(lines) if lines else "None cited.")
     note = (
         f"\n\n_Grounding: {stats.facts_grounded} facts grounded from {stats.contributing_sources} sources "

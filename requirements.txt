@@ -5,3 +5,6 @@ pytest
 openai
 langgraph
 pyyaml
+fastapi
+uvicorn
+streamlit
