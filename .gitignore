@@ -7,3 +7,5 @@ examples/
 .cache/
 eval_*.md
 test*.md
+evals/fixtures/
+evals/results/

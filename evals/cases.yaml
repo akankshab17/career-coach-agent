@@ -1,0 +1,25 @@
+# The eval cases. Each is run through the whole pipeline (see evals/run_evals.py).
+cases:
+  - name: google-intern
+    company: Google
+    role: Software Engineering Intern
+    level: intern
+    location: United States
+
+  - name: cummins-swe-new-grad
+    company: Cummins
+    role: Software Engineer
+    level: new-grad
+    location: United States
+
+  - name: perplexity-ai-engineer-new-grad
+    company: Perplexity
+    role: AI Engineer
+    level: new-grad
+    location: United States
+
+  - name: salesforce-apm-new-grad
+    company: Salesforce
+    role: Associate Product Manager
+    level: new-grad
+    location: United States

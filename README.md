@@ -141,3 +141,33 @@ each dropped sentence and each forum rewrite. It goes to `<output>.debug.md` wit
 `last_run.debug.md` (override with `--debug-file`).
 
 Only search/extract APIs are used — no scraping.
+
+## Evals (record / replay)
+Four fixed cases (`evals/cases.yaml`: Google intern, Cummins new-grad SWE, Perplexity AI Engineer, Salesforce APM) are run
+through the whole pipeline and scored, so a change can be checked for regressions instead of by eye.
+
+```
+python evals/run_evals.py --record        # run live once; saves search results + page texts + facts to evals/fixtures/<case>/
+python evals/run_evals.py                 # replay: no Tavily calls (needs the fixtures); LLM calls still happen (extraction cache helps)
+python evals/run_evals.py --from-facts    # replay only writer + finalize from each case's saved facts.json (test writer changes cheaply)
+```
+Options: `--cases a,b` (subset), `--no-cache` (redo extraction), `--no-fail` (exit 0 even on regressions),
+`--set-baseline` (pin this run's metrics as `evals/baseline.json`), `--list`.
+
+- **How record/replay works:** at the Tavily client, the only network seam. Everything of ours still runs in replay (queries,
+  filters, page cleaning and focusing, extraction, grounding, writing, finalize). The recording date is pinned, so the 12-month
+  recency filter doesn't drift. Anything the code asks for that wasn't recorded (e.g. after you change a search query) is printed as
+  `[replay] MISSING ...`, counted as `fixture misses`, and flagged: re-record that case.
+- **Fixtures are not committed** (`evals/fixtures/` is gitignored: they hold third-party page text). Neither is `evals/results/`.
+  `evals/baseline.json` (metrics only) is committed. Fixtures refuse to be written if they contain an API key.
+- **Table per case:** sources, full-text pages, facts by section, grounded, rejected, sentences dropped, rewrites, empty sections,
+  fixture misses, latency, tokens. Results go to `evals/results/<timestamp>.json` (plus each brief, debug file and log).
+- **Comparison** with the previous run (same kind) and with the baseline; `▼ WORSE` marks a metric that got worse. Exit code 1 if
+  any did, 2 if the run aborted (e.g. a daily LLM limit; aborted runs are never used for comparisons).
+  Writer metrics (sentences dropped, rewrites) are flagged only if worse by more than 2. Extraction/grounding metrics are strict
+  when both runs had the same extraction-cache hit rate, otherwise they get a tolerance (a fresh LLM sample differs a little).
+  Latency is judged only when the cache hit rates match; tokens, within 25%.
+- `--from-facts` reads `facts.json`, which every `--record` and full replay refreshes, so run a full replay after changing
+  extraction or grounding. Its extraction numbers are carried over, not recomputed, so only writer metrics are compared and it can't
+  set the baseline.
+

@@ -255,6 +255,17 @@ def reset_usage() -> None:
     _calls.clear()
 
 
+def usage_totals() -> dict:
+    """Token and time totals over every call since reset_usage() (reasoning tokens counted when the provider reports them)."""
+    return {
+        "calls": len(_calls),
+        "input": sum(c.input_tokens for c in _calls),
+        "output": sum(c.output_tokens for c in _calls),
+        "reasoning": sum(c.reasoning_tokens or 0 for c in _calls),
+        "latency": sum(c.latency for c in _calls),
+    }
+
+
 def _reasoning_total(calls: list[CallRecord]) -> int | None:
     """Reasoning tokens over the calls that reported them (they are already counted inside the output tokens)."""
     reported = [c.reasoning_tokens for c in calls if c.reasoning_tokens is not None]
