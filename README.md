@@ -25,6 +25,9 @@ Reasoning effort is sent to Groq as `reasoning_effort` for gpt-oss models only; 
 "thinks" before answering and that hidden reasoning is billed as output tokens, so `low` makes the many small extraction
 calls much cheaper and faster. It is not part of the extraction cache key (cached facts are reused whatever the effort).
 
+The writer runs at temperature 0 with a fixed seed (`SAMPLING` in `src/llm.py`) so the same facts give nearly the same draft;
+Groq and OpenAI only promise best-effort determinism, so wording can still vary a little. Extraction stays at 0.2.
+
 OpenAI needs `OPENAI_API_KEY`; Groq needs `GROQ_API_KEY`. To see which models your key can use right now (e.g. if a default gets retired):
 ```
 python src/llm.py models          # uses LLM_PROVIDER
@@ -94,6 +97,9 @@ search -> fetch -> extract -> ground -> coverage --enough--> write -> finalize
    `stage` (interview facts): `oa`, `phone-screen`, `team-screen`, `onsite` or `unknown`.
    `level` (interview facts): the seniority the source describes: `intern`, `new-grad`, `experienced` or `unknown`.
    `about_company`: false for facts about the publishing site (e.g. an interview-prep site's own practice tool) or another company.
+   The extractor is told each page's purpose (`company`, `role` or `interview`, the same purpose page focus uses) and to extract
+   what that page is good for even if it never mentions the role: told only the role, it returned nothing for company profiles
+   and for careers pages that don't name the role.
 4. **ground** (code, no LLM): a fact is kept only if its `exact_quote` appears in the page text or snippet (ignoring
    case, whitespace, punctuation, curly quotes, dashes, ellipses and markdown links). Also rejected: numbers in the fact that aren't in the quote, time-sensitive
    facts from undated sources, duplicates, and wrong-subject facts (flagged by the extractor, or naming the publishing
@@ -129,7 +135,7 @@ Each step prints a one-line count to stderr, ending with e.g.
 
 ### Extraction cache
 Extraction results are cached in `.cache/extract/` (one JSON file per URL + prompt version + extraction model + company/role/level
-+ a hash of the exact text the extractor read, so a change in how pages are cleaned or focused never reuses an old, e.g. empty, result),
++ page purpose + a hash of the exact text the extractor read, so a change in how pages are cleaned or focused never reuses an old, e.g. empty, result),
 so re-running the same company skips those LLM calls. `--no-cache` forces fresh extraction (and refreshes the cache).
 Switching `EXTRACT_MODEL` gives that model its own entries (never another model's facts). Bump `PROMPT_VERSION` in
 `src/facts.py` only when the extraction prompt itself changes.
@@ -152,7 +158,12 @@ python evals/run_evals.py                 # replay: no Tavily calls (needs the f
 python evals/run_evals.py --from-facts    # replay only writer + finalize from each case's saved facts.json (test writer changes cheaply)
 ```
 Options: `--cases a,b` (subset), `--no-cache` (redo extraction), `--no-fail` (exit 0 even on regressions),
-`--set-baseline` (pin this run's metrics as `evals/baseline.json`), `--list`.
+`--set-baseline` (pin this run's metrics as `evals/baseline.json`), `--list`, `--repeat N` (see below).
+
+- **`--repeat N`:** the writer is the noisiest step (on identical facts Salesforce once dropped 8 sentences, then 0). With
+  `--repeat N` each case runs once as usual, then writer + finalize run N-1 more times from that run's `facts.json`; sentences
+  dropped and rewrites become the mean of the N writer runs (each run's value is shown and saved as `writer_runs`; extra briefs are
+  saved as `<case>.repeatK.md`). Extraction, token and latency numbers come from the first run only.
 
 - **How record/replay works:** at the Tavily client, the only network seam. Everything of ours still runs in replay (queries,
   filters, page cleaning and focusing, extraction, grounding, writing, finalize). The recording date is pinned, so the 12-month

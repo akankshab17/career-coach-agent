@@ -276,7 +276,7 @@ def purpose_of(source: dict, company: str = "") -> str:
     if source.get("official") and source.get("type") != "news" and (source.get("group") in ("careers", "posting", "role") or
                                                                        is_careers_page(source["url"], company, source.get("group", ""))):
         return "role"
-    if source.get("group") in ("posting", "role", "careers"):
+    if source.get("group") in ("posting", "role", "careers", "jd"):
         return "role"
     if source.get("group") == "interview" or source.get("kind") in ("forum", "blog"):
         return "interview"

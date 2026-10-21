@@ -9,8 +9,8 @@ The user is learning: build in small steps, explain design decisions, stop after
 ## Pipeline (LangGraph, `src/graph.py`), in order
 `search -> fetch -> extract -> ground -> coverage -> [search_more -> fetch -> extract -> ground -> coverage, once] -> write -> finalize`
 - **search**: Tavily queries (company overview + news, the company's own careers pages, interview experiences incl. Reddit,
-  the posting). **fetch**: full page text via Tavily extract. **extract**: one LLM call per source returns facts as JSON
-  `{fact, exact_quote, section, stage, level, about_company}`. **ground**: code keeps a fact only if its quote is in the page.
+  the posting). **fetch**: full page text via Tavily extract. **extract**: one LLM call per source, told the page's purpose
+  (company/role/interview), returns facts as JSON `{fact, exact_quote, section, stage, level, about_company}`. **ground**: code keeps a fact only if its quote is in the page.
   **coverage**: fewer than 2 grounded interview or role facts triggers ONE follow-up search. **write**: one LLM call, grounded
   facts only. **finalize**: code-only checks, citations, rendering. Each step prints a one-line count to stderr.
 
@@ -41,8 +41,11 @@ The user is learning: build in small steps, explain design decisions, stop after
   `LLM_MODEL` sets both. **Reasoning effort**: `EXTRACT_REASONING_EFFORT` default low, `WRITE_REASONING_EFFORT` default medium; sent only
   to Groq gpt-oss models (hidden reasoning is billed as output tokens). Daily limits (TPD/RPD/quota) raise `QuotaExceededError` and stop
   the run with the wait time; per-minute limits retry using the provider's wait (cap 30s).
-- **Extraction cache** (`.cache/extract/`) key = prompt version + extraction model + URL + company/role/level + text kind + hash of the
-  exact text read. NOT the reasoning effort. Bump `PROMPT_VERSION` only when the extraction prompt changes; a model change or different
+- **Page purpose in the extraction prompt.** Told only the role, gpt-oss-20b at low effort returned `[]` for company profiles and
+  careers pages that never name the role (Cummins: all 5 pages; Google: Forbes). The prompt now says what each page is for.
+- **Writer sampling**: temperature 0 + seed (`SAMPLING` in `llm.py`; best effort on Groq). Extraction stays at 0.2.
+- **Extraction cache** (`.cache/extract/`) key = prompt version + extraction model + URL + company/role/level + text kind + page purpose +
+  hash of the exact text read. NOT the reasoning effort. Bump `PROMPT_VERSION` only when the extraction prompt changes; a model change or different
   page text already gets a new key. Don't cache by URL alone: an empty result from reading a site menu once stuck forever.
 - **Source types**: `official-posting | company-site | third-party-guide | job-aggregator | forum/blog | news`. Official = JD, company posting,
   or careers page. No official text -> section 3 says so and labels each fact by source type. Official sources' facts are sent first.
@@ -59,7 +62,8 @@ The user is learning: build in small steps, explain design decisions, stop after
   Tavily client, so all our logic runs in replay; only the network is replaced; the recording date is pinned.
 - `python evals/run_evals.py --record` (live; the USER runs this: it spends Tavily credits and Groq tokens) -> `evals/fixtures/<case>/`.
   Default = replay (no Tavily; LLM still runs, extraction cache helps). `--from-facts` = writer + finalize only from `facts.json`
-  (refreshed by every record/full replay). Other flags: `--cases a,b --no-cache --no-fail --set-baseline --list`.
+  (refreshed by every record/full replay). Other flags: `--cases a,b --no-cache --no-fail --set-baseline --list`, `--repeat N`
+  (writer + finalize N times per case from the same facts; writer metrics averaged).
 - Prints a table per case, saves `evals/results/<timestamp>.json`, compares with the previous run and `evals/baseline.json`, flags worse
   metrics (writer metrics only if worse by > 2), exit 1 on regression, 2 if aborted (daily limit).
 - **Fixtures and results are gitignored** (third-party page text; repo is public). `evals/baseline.json` (metrics only) IS committed.

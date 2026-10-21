@@ -1,5 +1,6 @@
 import json
 import os
+import re
 
 import pytest
 
@@ -222,7 +223,7 @@ def test_extraction_uses_the_extract_task_and_model_is_part_of_the_cache_key(mon
     monkeypatch.setenv("EXTRACT_MODEL", "openai/gpt-oss-120b")  # different model: its own entry, same prompt version
     _, cached = facts.extract_facts(src, "Stripe", "SWE", "new-grad")
     assert cached is False and len(calls) == 2
-    assert facts.PROMPT_VERSION == "extract-v4"  # a model change doesn't bump the prompt version
+    assert facts.PROMPT_VERSION == "extract-v5"  # a model change doesn't bump the prompt version
 
     monkeypatch.delenv("EXTRACT_MODEL")  # back to the default model: first entry is still there
     _, cached = facts.extract_facts(src, "Stripe", "SWE", "new-grad")
@@ -281,7 +282,7 @@ def test_extraction_prompt_asks_for_level_and_subject():
     assert '"level": "intern|new-grad|experienced|unknown"' in facts.EXTRACT_SYSTEM_PROMPT
     assert "about_company" in facts.EXTRACT_SYSTEM_PROMPT and "website or service that published the page" in facts.EXTRACT_SYSTEM_PROMPT
     assert "is_forum" not in facts.EXTRACT_SYSTEM_PROMPT
-    assert facts.PROMPT_VERSION == "extract-v4"
+    assert facts.PROMPT_VERSION == "extract-v5"
 
 
 # ---- level tag ----
@@ -370,7 +371,7 @@ def test_timeline_is_a_fact_section_and_the_extractor_is_told_what_it_is():
     assert "timeline" in facts.SECTIONS
     assert '"section": "company|interview|role|timeline"' in facts.EXTRACT_SYSTEM_PROMPT
     assert "Dates and deadlines are \"timeline\", never \"interview\"" in facts.EXTRACT_SYSTEM_PROMPT
-    assert "career and program pages" in facts.EXTRACT_SYSTEM_PROMPT
+    assert "careers and program pages" in facts.EXTRACT_SYSTEM_PROMPT
 
 
 def test_timeline_facts_are_grounded_without_stage_or_level():
@@ -389,3 +390,22 @@ def test_grounded_facts_carry_their_source_type_and_whether_it_is_official():
     plain, _ = facts.ground([cand("You will build APIs.", "You will build APIs for merchants", "role")],
                             sources(text="You will build APIs for merchants every day."))
     assert plain[0]["source_type"] == "" and plain[0]["official"] is False
+
+
+# ---- the extractor is told what the page is for ----
+
+def test_the_extractor_is_told_the_pages_purpose_and_it_is_part_of_the_cache_key(monkeypatch):
+    """Cummins/Google: told only the role, the extractor returned [] for company profiles and careers pages."""
+    prompts = []
+
+    def generate(system_prompt, user_prompt, task="write"):
+        prompts.append(user_prompt)
+        return '{"facts": []}'
+
+    monkeypatch.setattr(llm, "generate", generate)
+    page = {"url": "https://acme.com/about", "full_text": "Acme was founded in 1919.", "kind": "company"}
+    facts.extract_facts({**page, "group": "company"}, "Acme", "SWE", "new-grad")
+    facts.extract_facts({**page, "group": "careers", "official": True}, "Acme", "SWE", "new-grad")  # same text, other purpose
+    facts.extract_facts({"url": "jd://user-provided", "full_text": "JD", "group": "jd"}, "Acme", "SWE", "new-grad")
+    assert [re.search(r"^Page purpose: (\w+)$", p, re.M).group(1) for p in prompts] == ["company", "role", "role"]
+    assert '"Page purpose"' in facts.EXTRACT_SYSTEM_PROMPT and "even if it never mentions the role" in facts.EXTRACT_SYSTEM_PROMPT

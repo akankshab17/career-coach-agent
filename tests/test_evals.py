@@ -202,6 +202,35 @@ def test_facts_json_is_refreshed_by_a_full_replay(env):
     assert all("content" not in s or len(s["content"]) <= 300 for s in saved["sources"].values())  # not the whole pages again
 
 
+def test_repeat_averages_writer_metrics_over_n_writer_runs(env, monkeypatch, capsys):
+    """Salesforce dropped 8 sentences, then 0, on the same facts: one writer sample is too noisy to compare."""
+    go(env, "record")
+    base, runs = echo_llm(), []
+
+    def noisy(system, user, task="write"):
+        out = base(system, user, task)
+        if "extract facts" not in system:
+            runs.append(1)
+            out += "\n".join(f"- An uncited claim number {i}." for i in range(3 * (len(runs) - 1)))  # 0, 3, 6 dropped
+        return out
+
+    monkeypatch.setattr(llm, "generate", noisy)
+    run = go(env, "replay", repeat=3)
+    m = run.data["cases"][CASE.name]
+    assert len(runs) == 3 and run.data["repeat"] == 3
+    assert [r["dropped"] for r in m["writer_runs"]] == [0, 3, 6] and m["dropped"] == 3.0
+    first = json.loads((env["fixtures"] / CASE.name / "facts.json").read_text())
+    assert m["grounded"] == len(first["facts"])  # extraction numbers come from the one full run
+    out = env["results"] / run.data["timestamp"]
+    assert (out / f"{CASE.name}.repeat3.md").exists()
+    text = harness.render(run)
+    assert "mean of 3 writer runs" in text and re.search(r"sentences dropped per run: +0, 3, 6", text)
+
+
+def test_cli_rejects_a_repeat_below_1(env, capsys):
+    assert harness.main(["--repeat", "0"]) == 2
+
+
 # ---- clients ----
 
 def test_recording_and_replay_clients_roundtrip_and_report_misses(capsys):
@@ -296,7 +325,7 @@ def test_cache_counts_are_summed_over_the_extract_lines():
 
 
 def test_usage_totals_cover_every_call(monkeypatch):
-    monkeypatch.setitem(llm._PROVIDERS, "groq", lambda m, s, u, effort=None: ("t", 100, 50, 30))
+    monkeypatch.setitem(llm._PROVIDERS, "groq", lambda m, s, u, effort=None, **_: ("t", 100, 50, 30))
     llm.reset_usage()
     llm.generate("s", "u", task="extract")
     llm.generate("s", "u")

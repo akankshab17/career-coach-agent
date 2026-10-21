@@ -4,7 +4,7 @@ import llm
 
 
 def _fake_provider(name, calls):
-    def fn(model, system_prompt, user_prompt, effort=None):
+    def fn(model, system_prompt, user_prompt, effort=None, **_):
         calls.append((name, model))
         return "text", 1000, 500
     return fn
@@ -36,7 +36,7 @@ def test_retries_then_clear_error(monkeypatch):
 
     attempts = []
 
-    def flaky(model, s, u, effort=None):
+    def flaky(model, s, u, effort=None, **_):
         attempts.append(1)
         raise RateLimitError("429")
 
@@ -68,7 +68,7 @@ def test_truncated_output_is_flagged(capsys):
 
 def test_extract_and_write_use_different_models_by_default(monkeypatch):
     used = []
-    monkeypatch.setitem(llm._PROVIDERS, "groq", lambda model, s, u, effort=None: used.append(model) or ("text", 100, 50))
+    monkeypatch.setitem(llm._PROVIDERS, "groq", lambda model, s, u, effort=None, **_: used.append(model) or ("text", 100, 50))
     llm.reset_usage()
     llm.generate("s", "u", task="extract")
     llm.generate("s", "u", task="write")
@@ -140,7 +140,7 @@ def test_format_wait():
 def test_daily_limit_is_not_retried_and_says_how_long_to_wait(monkeypatch):
     attempts = []
 
-    def call(model, s, u, effort=None):
+    def call(model, s, u, effort=None, **_):
         attempts.append(model)
         raise RateLimitError(TPD)
 
@@ -161,7 +161,7 @@ def test_daily_limit_is_not_retried_and_says_how_long_to_wait(monkeypatch):
 ])
 def test_other_daily_and_quota_limits_are_also_fatal(monkeypatch, message):
     attempts = []
-    monkeypatch.setitem(llm._PROVIDERS, "groq", lambda m, s, u, effort=None: attempts.append(1) or (_ for _ in ()).throw(RateLimitError(message)))
+    monkeypatch.setitem(llm._PROVIDERS, "groq", lambda m, s, u, effort=None, **_: attempts.append(1) or (_ for _ in ()).throw(RateLimitError(message)))
     with pytest.raises(llm.QuotaExceededError):
         llm.generate("s", "u")
     assert len(attempts) == 1
@@ -169,7 +169,7 @@ def test_other_daily_and_quota_limits_are_also_fatal(monkeypatch, message):
 
 def test_per_minute_limit_retries_and_honours_the_wait_it_is_given(monkeypatch):
     sleeps = []
-    monkeypatch.setitem(llm._PROVIDERS, "groq", lambda m, s, u, effort=None: (_ for _ in ()).throw(RateLimitError(TPM)))
+    monkeypatch.setitem(llm._PROVIDERS, "groq", lambda m, s, u, effort=None, **_: (_ for _ in ()).throw(RateLimitError(TPM)))
     monkeypatch.setattr(llm, "_sleep", sleeps.append)
     with pytest.raises(llm.LLMError) as err:
         llm.generate("s", "u")
@@ -180,7 +180,7 @@ def test_per_minute_limit_retries_and_honours_the_wait_it_is_given(monkeypatch):
 def test_retry_wait_is_capped(monkeypatch):
     sleeps = []
     slow = TPM.replace("3.5s", "5m")
-    monkeypatch.setitem(llm._PROVIDERS, "groq", lambda m, s, u, effort=None: (_ for _ in ()).throw(RateLimitError(slow)))
+    monkeypatch.setitem(llm._PROVIDERS, "groq", lambda m, s, u, effort=None, **_: (_ for _ in ()).throw(RateLimitError(slow)))
     monkeypatch.setattr(llm, "_sleep", sleeps.append)
     with pytest.raises(llm.LLMError):
         llm.generate("s", "u")
@@ -191,7 +191,7 @@ def test_bad_key_and_missing_key_are_fatal(monkeypatch):
     class AuthenticationError(Exception):
         pass
 
-    monkeypatch.setitem(llm._PROVIDERS, "groq", lambda m, s, u, effort=None: (_ for _ in ()).throw(AuthenticationError("401 invalid api key")))
+    monkeypatch.setitem(llm._PROVIDERS, "groq", lambda m, s, u, effort=None, **_: (_ for _ in ()).throw(AuthenticationError("401 invalid api key")))
     with pytest.raises(llm.FatalLLMError, match="rejected the API key"):
         llm.generate("s", "u")
 
@@ -230,7 +230,7 @@ def test_effort_is_ignored_for_other_providers_and_models(monkeypatch, provider,
 
 def test_generate_passes_the_tasks_effort_to_the_provider(monkeypatch):
     sent = []
-    monkeypatch.setitem(llm._PROVIDERS, "groq", lambda model, s, u, effort=None: sent.append((model, effort)) or ("t", 1, 1))
+    monkeypatch.setitem(llm._PROVIDERS, "groq", lambda model, s, u, effort=None, **_: sent.append((model, effort)) or ("t", 1, 1))
     llm.generate("s", "u", task="extract")
     llm.generate("s", "u", task="write")
     monkeypatch.setenv("EXTRACT_REASONING_EFFORT", "medium")
@@ -271,7 +271,7 @@ def test_reasoning_tokens_are_read_from_usage_and_logged_separately(monkeypatch)
     assert llm._chat(client, "m", "s", "u")[3] is None  # provider didn't say
 
     results = iter([("t", 1000, 3000, 2500), ("t", 1000, 3000, 2000), ("t", 500, 800, 100)])
-    monkeypatch.setitem(llm._PROVIDERS, "groq", lambda model, s, u, effort=None: next(results))
+    monkeypatch.setitem(llm._PROVIDERS, "groq", lambda model, s, u, effort=None, **_: next(results))
     llm.reset_usage()
     llm.generate("s", "u", task="extract")
     llm.generate("s", "u", task="extract")
@@ -283,9 +283,36 @@ def test_reasoning_tokens_are_read_from_usage_and_logged_separately(monkeypatch)
 
 
 def test_no_reasoning_note_when_the_provider_does_not_return_it(monkeypatch):
-    monkeypatch.setitem(llm._PROVIDERS, "groq", lambda model, s, u, effort=None: ("t", 10, 20))
+    monkeypatch.setitem(llm._PROVIDERS, "groq", lambda model, s, u, effort=None, **_: ("t", 10, 20))
     monkeypatch.setenv("EXTRACT_MODEL", "llama-3.3-70b-versatile")
     llm.reset_usage()
     llm.generate("s", "u", task="extract")
     line = llm.summary_line()
     assert "reasoning" not in line and "effort" not in line and "llama-3.3-70b-versatile 1 calls in=10 out=20" in line
+
+
+# ---- sampling: the writer is deterministic (temperature 0 + seed) ----
+
+def test_writer_runs_at_temperature_0_with_a_seed_and_extraction_keeps_its_temperature(monkeypatch):
+    sent = []
+    monkeypatch.setitem(llm._PROVIDERS, "groq", lambda model, s, u, effort=None, sampling=None: sent.append(sampling) or ("t", 1, 1))
+    llm.generate("s", "u", task="write")
+    llm.generate("s", "u", task="extract")
+    assert sent[0]["temperature"] == 0 and isinstance(sent[0]["seed"], int)
+    assert sent[1] == {"temperature": 0.2}
+
+
+def test_chat_sends_temperature_and_seed():
+    from types import SimpleNamespace as NS
+
+    seen = []
+
+    def create(**kw):
+        seen.append(kw)
+        return NS(choices=[NS(finish_reason="stop", message=NS(content="ok"))], usage=NS(prompt_tokens=1, completion_tokens=1))
+
+    client = NS(chat=NS(completions=NS(create=create)))
+    llm._chat(client, "m", "s", "u", sampling={"temperature": 0.0, "seed": 7})
+    llm._chat(client, "m", "s", "u")
+    assert (seen[0]["temperature"], seen[0]["seed"]) == (0.0, 7)
+    assert seen[1]["temperature"] == 0.2 and "seed" not in seen[1]

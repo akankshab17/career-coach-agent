@@ -13,7 +13,7 @@ from urllib.parse import urlparse
 
 import llm
 
-PROMPT_VERSION = "extract-v4"  # bump when EXTRACT_SYSTEM_PROMPT changes, so old cache entries are ignored
+PROMPT_VERSION = "extract-v5"  # bump when EXTRACT_SYSTEM_PROMPT changes, so old cache entries are ignored
 CACHE_DIR = os.path.join(".cache", "extract")
 SECTIONS = ("company", "interview", "role", "timeline")
 STAGES = ("oa", "phone-screen", "team-screen", "onsite", "unknown")
@@ -65,8 +65,14 @@ Rules:
   "role" = responsibilities, qualifications, skills, program description, team, location of the role;
   "timeline" = the APPLICATION calendar: when applications open or close, deadlines, decision dates, start dates,
   how long the process takes. Dates and deadlines are "timeline", never "interview".
-- Company career and program pages (the company's own site) are the best source for "role" and "interview" facts:
-  extract what the page says about the program, eligibility, qualifications, how to apply and the process.
+- "Page purpose" says why the page was chosen. Extract what the page is good for, even if it never mentions the role
+  or the interview:
+  "company" (about pages, company profiles, news): what the company does, products, history, headquarters, mission, news.
+  "role" (the company's careers and program pages, postings): the programs, eligibility, qualifications, skills, how to
+  apply, the hiring process, dates. A careers page that covers several programs still counts: extract what fits the
+  candidate's level.
+  "interview" (guides, forum posts): stages, formats, question types, tips.
+  Facts for other sections found on the page are welcome too.
 - stage (interview facts only; use "unknown" otherwise): which interview stage the fact is about.
   "oa" = online assessment / OA / take-home test; "phone-screen" = recruiter or technical phone/video screen;
   "team-screen" = team/hiring-manager conversation; "onsite" = onsite / virtual onsite / final loop.
@@ -98,13 +104,13 @@ def source_text(source: dict) -> tuple[str, str]:
 
 # ---------- extraction (LLM) + cache ----------
 
-def _cache_path(url: str, company: str, role: str, level: str, text_kind: str, model: str, text: str) -> str:
+def _cache_path(url: str, company: str, role: str, level: str, text_kind: str, model: str, text: str, purpose: str = "") -> str:
     # Key: URL + prompt version + the model that extracted + a hash of the exact text it read. Company/role/level
-    # are in the prompt too, and text_kind keeps snippet and full-page extractions apart. A different model = a
+    # and the page purpose are in the prompt too, and text_kind keeps snippet and full-page extractions apart. A different model = a
     # different entry; the prompt version changes only when the prompt does. The text hash means that when the
     # text we feed the extractor changes (better page cleaning, a different part of the page), old results
     # (even an empty list from reading a menu) are not reused. A pasted JD is keyed on its text for the same reason.
-    key = "|".join([PROMPT_VERSION, model, url, company.lower(), role.lower(), level, text_kind,
+    key = "|".join([PROMPT_VERSION, model, url, company.lower(), role.lower(), level, text_kind, purpose,
                     hashlib.sha256(text.encode()).hexdigest()])
     return os.path.join(CACHE_DIR, hashlib.sha256(key.encode()).hexdigest()[:32] + ".json")
 
@@ -119,17 +125,23 @@ def parse_facts(output: str) -> list[dict]:
 
 
 def extract_facts(source: dict, company: str, role: str, level: str, use_cache: bool = True) -> tuple[list[dict], bool]:
-    """LLM-extract candidate facts from one source's text (full page or snippet). Returns (facts, came_from_cache)."""
+    """LLM-extract candidate facts from one source's text (full page or snippet). Returns (facts, came_from_cache).
+
+    The page's purpose (company / role / interview) is part of the prompt: without it the extractor, told only the role,
+    returned [] for company pages and careers pages that never name the role (Cummins, Forbes on Google)."""
+    from search import purpose_of
+
     text, text_kind = source_text(source)
+    purpose = purpose_of(source, company)
     provider, model = llm.get_settings("extract")
     model_id = f"{provider}/{model}"
-    path = _cache_path(source["url"], company, role, level, text_kind, model_id, text)
+    path = _cache_path(source["url"], company, role, level, text_kind, model_id, text, purpose)
     if use_cache and os.path.exists(path):
         with open(path) as f:
             return json.load(f)["facts"], True
 
     user = (
-        f"Company: {company}\nRole: {role}\nCandidate level: {level}\n"
+        f"Company: {company}\nRole: {role}\nCandidate level: {level}\nPage purpose: {purpose}\n"
         f"URL: {source['url']}\nPublished: {source.get('published_date') or 'unknown'}\n\n"
         f"Page text{' (search snippet only)' if text_kind == 'snippet' else ''}:\n{text}"
     )

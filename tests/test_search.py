@@ -461,6 +461,7 @@ def test_purpose_of_a_source():
     assert search.purpose_of(mk(group="company", type="news")) == "company"
     assert search.purpose_of(mk(group="careers", official=True, type="company-site")) == "role"
     assert search.purpose_of(mk(group="posting", official=False, type="job-aggregator")) == "role"
+    assert search.purpose_of(mk(group="jd")) == "role"  # a pasted JD
     assert search.purpose_of(mk(group="interview", kind="other")) == "interview"
     assert search.purpose_of(mk(group="company", kind="forum")) == "interview"
     assert search.purpose_of({"url": "https://www.acme.com/company/careers/university/apm", "group": "company", "kind": "company",

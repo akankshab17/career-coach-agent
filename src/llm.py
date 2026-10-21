@@ -32,6 +32,11 @@ EFFORT_ENV = {"extract": "EXTRACT_REASONING_EFFORT", "write": "WRITE_REASONING_E
 DEFAULT_EFFORT = {"extract": "low", "write": "medium"}
 EFFORTS = ("low", "medium", "high")
 
+# Sampling per task. The writer runs at temperature 0 with a fixed seed so the same facts give (nearly) the same draft:
+# writer metrics (sentences dropped) swung 8 -> 0 on identical input at 0.2. Groq and OpenAI treat the seed as best effort.
+# Extraction keeps a little temperature; its results are cached, so it doesn't add run-to-run noise there.
+SAMPLING = {"extract": {"temperature": 0.2}, "write": {"temperature": 0.0, "seed": 7}}
+
 MAX_OUTPUT_TOKENS = 16384  # reasoning models (gpt-oss) spend part of this on hidden reasoning
 RETRIES = 2  # retries after the first attempt -> 3 attempts total
 BACKOFF_SECONDS = 2  # waits 2s, then 4s
@@ -101,13 +106,15 @@ def truncation_count() -> int:
     return _truncated
 
 
-def _chat(client, model: str, system_prompt: str, user_prompt: str, reasoning_effort: str | None = None):
-    """One chat-completions call (Groq and OpenAI share the shape).
+def _chat(client, model: str, system_prompt: str, user_prompt: str, reasoning_effort: str | None = None,
+          sampling: dict | None = None):
+    """One chat-completions call (Groq and OpenAI share the shape). `sampling`: temperature (default 0.2) and an optional seed.
     Returns (text, input tokens, output tokens, reasoning tokens or None)."""
     extra = {"reasoning_effort": reasoning_effort} if reasoning_effort else {}
+    sampling = {"temperature": 0.2, **(sampling or {})}
     resp = client.chat.completions.create(
         model=model,
-        temperature=0.2,
+        **sampling,
         max_completion_tokens=MAX_OUTPUT_TOKENS,
         messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
         **extra,
@@ -122,16 +129,16 @@ def _chat(client, model: str, system_prompt: str, user_prompt: str, reasoning_ef
     return choice.message.content or "", resp.usage.prompt_tokens, resp.usage.completion_tokens, reasoning
 
 
-def _call_groq(model, system_prompt, user_prompt, reasoning_effort=None):
+def _call_groq(model, system_prompt, user_prompt, reasoning_effort=None, sampling=None):
     from groq import Groq
 
-    return _chat(Groq(api_key=_require_key("GROQ_API_KEY")), model, system_prompt, user_prompt, reasoning_effort)
+    return _chat(Groq(api_key=_require_key("GROQ_API_KEY")), model, system_prompt, user_prompt, reasoning_effort, sampling)
 
 
-def _call_openai(model, system_prompt, user_prompt, reasoning_effort=None):
+def _call_openai(model, system_prompt, user_prompt, reasoning_effort=None, sampling=None):
     from openai import OpenAI
 
-    return _chat(OpenAI(api_key=_require_key("OPENAI_API_KEY")), model, system_prompt, user_prompt, reasoning_effort)
+    return _chat(OpenAI(api_key=_require_key("OPENAI_API_KEY")), model, system_prompt, user_prompt, reasoning_effort, sampling)
 
 
 _PROVIDERS = {"groq": _call_groq, "openai": _call_openai}
@@ -195,7 +202,8 @@ def _classify(exc: Exception, provider: str, model: str) -> LLMError | float | N
 
 def generate(system_prompt: str, user_prompt: str, task: str = "write") -> str:
     """Call the configured model for `task` ("extract" or "write") and record tokens, latency and cost.
-    For Groq gpt-oss models the task's reasoning effort is sent along; other providers/models ignore it."""
+    For Groq gpt-oss models the task's reasoning effort is sent along; other providers/models ignore it.
+    The task's SAMPLING (temperature, seed) is sent to every provider."""
     provider, model = get_settings(task)
     effort = get_reasoning_effort(task, provider, model)
     call = _PROVIDERS[provider]
@@ -203,7 +211,7 @@ def generate(system_prompt: str, user_prompt: str, task: str = "write") -> str:
     for attempt in range(RETRIES + 1):
         start = time.perf_counter()
         try:
-            text, in_tok, out_tok, *rest = call(model, system_prompt, user_prompt, effort)
+            text, in_tok, out_tok, *rest = call(model, system_prompt, user_prompt, effort, sampling=SAMPLING[task])
             reasoning = rest[0] if rest else None
             break
         except LLMError:

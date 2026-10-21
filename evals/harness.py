@@ -6,6 +6,7 @@ building, filters, page cleaning and focusing, extraction, grounding, writing, f
     python evals/run_evals.py --record        run live, save search results + page texts (+ facts) per case
     python evals/run_evals.py                 replay: no Tavily calls; LLM calls still happen (the extraction cache helps)
     python evals/run_evals.py --from-facts    replay only the writer + finalize from each case's saved facts.json
+    python evals/run_evals.py --repeat 3      run the writer 3 times per case and average the writer metrics
 
 Fixtures contain third-party page text, so evals/fixtures/ and evals/results/ are gitignored; only evals/cases.yaml
 and evals/baseline.json (metrics only) are committed.
@@ -74,6 +75,7 @@ LABELS = {
     "latency_s": "latency (s)", "tokens_in": "tokens in", "tokens_out": "tokens out", "tokens_reasoning": "of which reasoning",
 }
 WRITER_ONLY_KINDS = {"writer", "output"}  # what can be compared between a facts-only run and a full run
+WRITER_METRICS = tuple(m for m, (_, kind) in METRICS.items() if kind == "writer")  # averaged over --repeat runs
 
 
 class Aborted(Exception):
@@ -418,8 +420,11 @@ def set_baseline(path: Path, run: dict) -> list[str]:
 
 # ====================================================================== running
 
-def run_case(case: Case, mode: str, use_cache: bool, fixtures: Path | None, out_dir: Path | None) -> dict:
-    """Run one case in `mode` ('record' | 'replay' | 'from-facts'). Returns its metrics dict (status ok/failed)."""
+def run_case(case: Case, mode: str, use_cache: bool, fixtures: Path | None, out_dir: Path | None, repeat: int = 1) -> dict:
+    """Run one case in `mode` ('record' | 'replay' | 'from-facts'). Returns its metrics dict (status ok/failed).
+
+    With repeat > 1 the writer + finalize run (repeat - 1) more times from the facts this run saved, and the writer
+    metrics become the mean over all runs (per-run values in `writer_runs`). Everything else comes from the first run."""
     llm.reset_usage()
     stats = RunStats()
     log = io.StringIO()
@@ -467,7 +472,33 @@ def run_case(case: Case, mode: str, use_cache: bool, fixtures: Path | None, out_
         if text:
             (out_dir / f"{case.name}.md").write_text(text)
         (out_dir / f"{case.name}.debug.md").write_text(stats.debug_report(sources or {}))
+    if repeat > 1 and not error:
+        repeat_writer(case, metrics, repeat, fixtures, out_dir)
     return metrics
+
+
+def writer_metrics(stats: RunStats) -> dict:
+    return {"dropped": len(stats.drops), "rewrites": len(stats.rewrites)}
+
+
+def repeat_writer(case: Case, metrics: dict, repeat: int, fixtures: Path | None, out_dir: Path | None) -> None:
+    """Run writer + finalize (repeat - 1) more times on the same facts; replace the writer metrics by their mean.
+    The writer is sampled at temperature 0 with a seed, but providers only promise best-effort determinism."""
+    runs = [{k: metrics[k] for k in WRITER_METRICS}]
+    for i in range(2, repeat + 1):
+        stats, log = RunStats(), io.StringIO()
+        try:
+            with contextlib.redirect_stderr(log):
+                result = run_from_facts(case, fixtures, stats)
+        except llm.QuotaExceededError:
+            raise Aborted(f"daily LLM limit reached during '{case.name}' (writer repeat {i}/{repeat})")
+        runs.append(writer_metrics(stats))
+        if out_dir is not None:
+            (out_dir / f"{case.name}.repeat{i}.md").write_text(result.text)
+            (out_dir / f"{case.name}.repeat{i}.debug.md").write_text(stats.debug_report(result.sources))
+    for k in WRITER_METRICS:
+        metrics[k] = round(sum(r[k] for r in runs) / len(runs), 1)
+    metrics["writer_runs"] = runs
 
 
 def run_from_facts(case: Case, fixtures: Path | None, stats: RunStats) -> brief.BriefResult:
@@ -501,17 +532,17 @@ class Run:
 
 
 def run_all(cases: list[Case], mode: str, use_cache: bool = True, fixtures: Path | None = None, results: Path | None = None,
-            baseline_path: Path | None = None) -> Run:
+            baseline_path: Path | None = None, repeat: int = 1) -> Run:
     results = results or EVALS / "results"
     baseline_path = baseline_path or EVALS / "baseline.json"
     timestamp = unique_timestamp(results)
     out_dir = results / timestamp
-    data = {"timestamp": timestamp, "mode": mode, "use_cache": use_cache, "git": git_info(), "models": model_info(),
-            "aborted": None, "cases": {}}
+    data = {"timestamp": timestamp, "mode": mode, "use_cache": use_cache, "repeat": repeat, "git": git_info(),
+            "models": model_info(), "aborted": None, "cases": {}}
     for case in cases:
         print(f"[eval] {case.name}: running ({mode})...", flush=True)  # the pipeline's own logs go to <case>.log
         try:
-            data["cases"][case.name] = run_case(case, mode, use_cache, fixtures, out_dir)
+            data["cases"][case.name] = run_case(case, mode, use_cache, fixtures, out_dir, repeat)
             m = data["cases"][case.name]
             print(f"[eval] {case.name}: {m['status']} in {m['latency_s']}s", flush=True)
         except Aborted as exc:
@@ -548,6 +579,8 @@ def render(run: Run) -> str:
            f"({data['models'].get('extract_effort')}), write: {data['models'].get('write')} ({data['models'].get('write_effort')})"]
     if data["mode"] == "from-facts":
         out.append("Facts-only run: extraction/grounding numbers come from facts.json, not recomputed; only writer metrics are compared.")
+    if data.get("repeat", 1) > 1:
+        out.append(f"Writer metrics ({', '.join(LABELS[k] for k in WRITER_METRICS)}) are the mean of {data['repeat']} writer runs per case.")
     refs = list(run.comparisons)
     for name, m in data["cases"].items():
         out += ["", f"=== {name} " + ("(FAILED: " + m.get("error", "") + ")" if m["status"] != "ok" else "") + "=" * 20]
@@ -563,6 +596,8 @@ def render(run: Run) -> str:
                 else:
                     cells.append(f"{fmt(row['ref'])} {MARK[row['verdict']]}".strip() + (f" ({row['note']})" if row["verdict"] == "worse" and row["note"] else ""))
             rows.append(cells)
+        for k in WRITER_METRICS if m.get("writer_runs") else ():
+            rows.append([f"  {LABELS[k]} per run:", ", ".join(str(r[k]) for r in m["writer_runs"])] + [""] * len(refs))
         if m.get("empty_section_names"):
             rows.append(["  empty:", ", ".join(m["empty_section_names"])] + [""] * len(refs))
         rate = cache_rate(m)
@@ -594,6 +629,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--no-fail", action="store_true", help="exit 0 even if a metric got worse")
     p.add_argument("--set-baseline", action="store_true", help="after the run, pin its metrics as evals/baseline.json")
     p.add_argument("--list", action="store_true", help="list the cases and exit")
+    p.add_argument("--repeat", type=int, default=1, metavar="N",
+                   help="run the writer N times per case (from the same facts) and average the writer metrics")
     args = p.parse_args(argv)
 
     from dotenv import load_dotenv
@@ -609,9 +646,12 @@ def main(argv: list[str] | None = None) -> int:
             print(f"unknown case(s): {', '.join(unknown)}. Known: {', '.join(c.name for c in cases)}", file=sys.stderr)
             return 2
         cases = [c for c in cases if c.name in wanted]
+    if args.repeat < 1:
+        print("--repeat must be at least 1", file=sys.stderr)
+        return 2
     mode_name = "record" if args.record else "from-facts" if args.from_facts else "replay"
     try:
-        run = run_all(cases, mode_name, use_cache=not args.no_cache)
+        run = run_all(cases, mode_name, use_cache=not args.no_cache, repeat=args.repeat)
     except FileNotFoundError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 2
