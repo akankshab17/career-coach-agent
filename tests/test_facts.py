@@ -409,3 +409,31 @@ def test_the_extractor_is_told_the_pages_purpose_and_it_is_part_of_the_cache_key
     facts.extract_facts({"url": "jd://user-provided", "full_text": "JD", "group": "jd"}, "Acme", "SWE", "new-grad")
     assert [re.search(r"^Page purpose: (\w+)$", p, re.M).group(1) for p in prompts] == ["company", "role", "role"]
     assert '"Page purpose"' in facts.EXTRACT_SYSTEM_PROMPT and "even if it never mentions the role" in facts.EXTRACT_SYSTEM_PROMPT
+
+
+def test_facts_from_the_fallback_model_are_cached_under_that_model_not_groqs(monkeypatch):
+    from test_llm import TPD, RateLimitError
+
+    calls = []
+
+    def groq(model, s, u, effort=None, **_):
+        calls.append("groq")
+        raise RateLimitError(TPD)
+
+    def openai(model, s, u, effort=None, **_):
+        calls.append("openai")
+        return '{"facts": []}', 10, 10
+
+    monkeypatch.setitem(llm._PROVIDERS, "groq", groq)
+    monkeypatch.setitem(llm._PROVIDERS, "openai", openai)
+    monkeypatch.setenv("FALLBACK_PROVIDER", "openai")
+    monkeypatch.setenv("FALLBACK_EXTRACT_MODEL", "gpt-5.6-luna")
+    src = {"url": "https://acme.com/about", "full_text": "Acme was founded in 1919.", "group": "company"}
+    assert facts.extract_facts(src, "Acme", "SWE", "new-grad") == ([], False)
+    files = os.listdir(facts.CACHE_DIR)
+    assert len(files) == 1 and json.load(open(os.path.join(facts.CACHE_DIR, files[0])))["model"] == "openai/gpt-5.6-luna"
+    assert facts.extract_facts(src, "Acme", "SWE", "new-grad") == ([], True)  # same run, still on the fallback: cached
+    llm.reset_fallback()
+    monkeypatch.setitem(llm._PROVIDERS, "groq", lambda model, s, u, effort=None, **_: calls.append("groq") or ('{"facts": []}', 1, 1))
+    assert facts.extract_facts(src, "Acme", "SWE", "new-grad") == ([], False)  # back on Groq: the fallback's entry isn't reused
+    assert calls == ["groq", "openai", "groq"]

@@ -539,3 +539,52 @@ def test_render_shows_a_table_per_case_with_every_metric(env):
                   "rejected", "sentences dropped", "empty sections", "latency (s)", "tokens in", "tokens out"):
         assert label in text, label
     assert text.count("=== acme-new-grad") == 1 and "0 regression(s)." in text
+
+
+# ---- which provider served each case ----
+
+_REAL_GENERATE = llm.generate  # captured at import, before the env fixture swaps in echo_llm
+
+
+def provider_llm(monkeypatch, groq_daily_limit):
+    """Real llm.generate over fake providers that answer like echo_llm; Groq can be made to hit its daily limit."""
+    from test_llm import TPD, RateLimitError
+
+    echo = echo_llm()
+
+    def groq(model, s, u, effort=None, **_):
+        if groq_daily_limit:
+            raise RateLimitError(TPD)
+        return echo(s, u), 10, 10
+
+    monkeypatch.setitem(llm._PROVIDERS, "groq", groq)
+    monkeypatch.setitem(llm._PROVIDERS, "openai", lambda model, s, u, effort=None, **_: (echo(s, u), 10, 10))
+    monkeypatch.setattr(llm, "generate", _REAL_GENERATE)
+    monkeypatch.setenv("FALLBACK_PROVIDER", "openai")
+    monkeypatch.setenv("FALLBACK_EXTRACT_MODEL", "gpt-5.6-luna")
+    monkeypatch.setenv("FALLBACK_WRITE_MODEL", "gpt-5.4-mini")
+
+
+def test_each_case_records_its_provider_and_a_provider_change_is_flagged_not_failed(env, monkeypatch):
+    provider_llm(monkeypatch, groq_daily_limit=False)
+    first = go(env, "record")
+    assert first.data["cases"][CASE.name]["llm"] == {"extract": ["groq/openai/gpt-oss-20b"], "write": ["groq/openai/gpt-oss-120b"]}
+    assert first.data["models"]["fallback"] == {"provider": "openai", "extract": "gpt-5.6-luna", "write": "gpt-5.4-mini"}
+
+    provider_llm(monkeypatch, groq_daily_limit=True)
+    run = go(env, "replay", use_cache=False)
+    m = run.data["cases"][CASE.name]
+    assert m["llm"] == {"extract": ["openai/gpt-5.6-luna"], "write": ["openai/gpt-5.4-mini"]} and m["fallback_calls"] > 0
+    changed = run.provider_changes
+    assert {row["metric"] for _, _, row in changed} == {"provider (extract)", "provider (write)"}
+    assert all(row["ref"] == "groq" and row["cur"] == "openai" for _, _, row in changed)
+    assert not any(row["verdict"] == "changed" for _, _, row in run.regressions)  # a warning, not a regression
+    text = harness.render(run)
+    assert "WARNING: 2 provider change(s)" in text and "≠ CHANGED" in text and "openai/gpt-5.6-luna" in text
+
+
+def test_a_baseline_without_provider_records_is_compared_with_its_configured_provider():
+    cur = {"llm": {"extract": ["openai/gpt-5.6-luna"], "write": ["groq/openai/gpt-oss-120b"]}}
+    rows = harness.provider_rows({}, cur, {"provider": "groq"}, {})
+    assert [(r["metric"], r["ref"], r["cur"]) for r in rows] == [("provider (extract)", "groq", "openai")]
+    assert harness.provider_rows({}, cur, {}, {}) == []  # nothing known about the reference: nothing to flag

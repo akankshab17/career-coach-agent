@@ -38,6 +38,7 @@ def main(argv: list[str] | None = None) -> None:
 
     load_dotenv()
     llm.reset_usage()
+    llm.reset_fallback()  # a new run starts on the primary provider
     stats = RunStats()
     debug_path = args.debug_file or (os.path.splitext(args.output)[0] + ".debug.md" if args.output else "last_run.debug.md")
     try:

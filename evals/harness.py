@@ -276,6 +276,9 @@ def case_metrics(stats: RunStats, text: str, latency: float, usage: dict, misses
         "tokens_out": usage["output"],
         "tokens_reasoning": usage["reasoning"],
         # context for the comparison (not metrics):
+        "llm": usage.get("models", {}),  # {task: ["provider/model", ...]} that actually served this case
+        "fallback_calls": usage.get("fallback_calls", 0),
+        "cost_usd": usage.get("cost", 0.0),
         "empty_section_names": empty,
         "cache_hits": cache[0] if cache else None,
         "cache_misses": cache[1] if cache else None,
@@ -328,11 +331,31 @@ def judge(metric: str, ref, cur, ref_case: dict, cur_case: dict) -> tuple[str, s
     return "worse", ""  # output: strict
 
 
-def compare_case(ref: dict | None, cur: dict, ref_mode: str, cur_mode: str) -> list[dict]:
-    """Rows {metric, ref, cur, verdict, note} for every comparable metric."""
+def providers(case: dict | None, run_models: dict | None = None) -> dict[str, list[str]]:
+    """{task: [provider, ...]} that served a case. Runs from before this was recorded fall back to the run's configured
+    provider (for every task)."""
+    used = (case or {}).get("llm") or {}
+    if used:
+        return {task: sorted({m.split("/")[0] for m in models}) for task, models in used.items()}
+    provider = (run_models or {}).get("provider")
+    return {task: [provider] for task in ("extract", "write")} if provider else {}
+
+
+def provider_rows(ref: dict, cur: dict, ref_models: dict | None, cur_models: dict | None) -> list[dict]:
+    """A 'changed' row per task whose provider differs between the two runs: their metrics measure different models."""
+    before, now = providers(ref, ref_models), providers(cur, cur_models)
+    return [{"metric": f"provider ({task})", "ref": "+".join(before[task]), "cur": "+".join(now[task]), "verdict": "changed",
+             "note": "different LLM provider: metrics are not comparable"}
+            for task in now if task in before and before[task] != now[task]]
+
+
+def compare_case(ref: dict | None, cur: dict, ref_mode: str, cur_mode: str, ref_models: dict | None = None,
+                 cur_models: dict | None = None) -> list[dict]:
+    """Rows {metric, ref, cur, verdict, note} for every comparable metric (+ a 'changed' row if the provider differs)."""
     rows = []
     if ref is None:
         return rows
+    rows += provider_rows(ref, cur, ref_models, cur_models)
     same_family = family(ref_mode) == family(cur_mode)
     for metric, (_, kind) in METRICS.items():
         if not same_family and kind not in WRITER_ONLY_KINDS:
@@ -346,6 +369,10 @@ def compare_case(ref: dict | None, cur: dict, ref_mode: str, cur_mode: str) -> l
 
 def regressions(comparison: dict[str, list[dict]]) -> list[tuple[str, dict]]:
     return [(case, row) for case, rows in comparison.items() for row in rows if row["verdict"] == "worse"]
+
+
+def provider_changes(comparison: dict[str, list[dict]]) -> list[tuple[str, dict]]:
+    return [(case, row) for case, rows in comparison.items() for row in rows if row["verdict"] == "changed"]
 
 
 # ====================================================================== results + baseline
@@ -362,11 +389,14 @@ def git_info() -> dict:
 
 def model_info() -> dict:
     try:
-        provider, extract_model = llm.get_settings("extract")
-        _, write_model = llm.get_settings("write")
-        return {"provider": provider, "extract": extract_model, "write": write_model,
+        provider, extract_model = llm.primary_settings("extract")
+        _, write_model = llm.primary_settings("write")
+        info = {"provider": provider, "extract": extract_model, "write": write_model,
                 "extract_effort": llm.get_reasoning_effort("extract", provider, extract_model),
                 "write_effort": llm.get_reasoning_effort("write", provider, write_model)}
+        if fallback := llm.fallback_settings("extract"):
+            info["fallback"] = {"provider": fallback[0], "extract": fallback[1], "write": llm.fallback_settings("write")[1]}
+        return info
     except llm.LLMError:
         return {}
 
@@ -399,7 +429,8 @@ METRIC_KEYS = tuple(METRICS)
 
 def baseline_entry(case_metrics_: dict) -> dict:
     return {k: case_metrics_[k] for k in METRIC_KEYS if k in case_metrics_} | {
-        k: case_metrics_[k] for k in ("cache_hits", "cache_misses") if case_metrics_.get(k) is not None}
+        k: case_metrics_[k] for k in ("cache_hits", "cache_misses") if case_metrics_.get(k) is not None} | (
+        {"llm": case_metrics_["llm"]} if case_metrics_.get("llm") else {})
 
 
 def set_baseline(path: Path, run: dict) -> list[str]:
@@ -530,6 +561,10 @@ class Run:
     def regressions(self) -> list[tuple[str, str, dict]]:
         return [(ref, case, row) for ref, comp in self.comparisons.items() for case, row in regressions(comp)]
 
+    @property
+    def provider_changes(self) -> list[tuple[str, str, dict]]:
+        return [(ref, case, row) for ref, comp in self.comparisons.items() for case, row in provider_changes(comp)]
+
 
 def run_all(cases: list[Case], mode: str, use_cache: bool = True, fixtures: Path | None = None, results: Path | None = None,
             baseline_path: Path | None = None, repeat: int = 1) -> Run:
@@ -537,6 +572,7 @@ def run_all(cases: list[Case], mode: str, use_cache: bool = True, fixtures: Path
     baseline_path = baseline_path or EVALS / "baseline.json"
     timestamp = unique_timestamp(results)
     out_dir = results / timestamp
+    llm.reset_fallback()  # the run starts on the primary provider; a daily limit switches it for the rest of the run
     data = {"timestamp": timestamp, "mode": mode, "use_cache": use_cache, "repeat": repeat, "git": git_info(),
             "models": model_info(), "aborted": None, "cases": {}}
     for case in cases:
@@ -555,17 +591,19 @@ def run_all(cases: list[Case], mode: str, use_cache: bool = True, fixtures: Path
         prev = previous_run(results, mode, exclude=timestamp)
         if prev:
             run.comparisons["previous run " + prev["timestamp"]] = {
-                n: compare_case(prev["cases"].get(n), c, prev["mode"], mode) for n, c in data["cases"].items()}
+                n: compare_case(prev["cases"].get(n), c, prev["mode"], mode, prev.get("models"), data["models"])
+                for n, c in data["cases"].items()}
         if baseline_path.exists():
             base = json.loads(baseline_path.read_text())
             run.comparisons["baseline"] = {
-                n: compare_case(base["cases"].get(n), c, base.get("mode", "replay"), mode) for n, c in data["cases"].items()}
+                n: compare_case(base["cases"].get(n), c, base.get("mode", "replay"), mode, base.get("models"), data["models"])
+                for n, c in data["cases"].items()}
     return run
 
 
 # ====================================================================== printing
 
-MARK = {"worse": "▼ WORSE", "better": "▲", "same": "", "info": ""}
+MARK = {"worse": "▼ WORSE", "better": "▲", "same": "", "info": "", "changed": "≠ CHANGED"}
 
 
 def fmt(v) -> str:
@@ -598,6 +636,14 @@ def render(run: Run) -> str:
             rows.append(cells)
         for k in WRITER_METRICS if m.get("writer_runs") else ():
             rows.append([f"  {LABELS[k]} per run:", ", ".join(str(r[k]) for r in m["writer_runs"])] + [""] * len(refs))
+        for task, models in (m.get("llm") or {}).items():
+            cells = [f"llm: {task}", ", ".join(models)]
+            for r in refs:
+                row = lookup[r].get(f"provider ({task})")
+                cells.append(f"{row['ref']} {MARK['changed']}" if row else "")
+            rows.append(cells)
+        if m.get("fallback_calls"):
+            rows.append(["  fallback calls", f"{m['fallback_calls']} (${m.get('cost_usd', 0):.4f})"] + [""] * len(refs))
         if m.get("empty_section_names"):
             rows.append(["  empty:", ", ".join(m["empty_section_names"])] + [""] * len(refs))
         rate = cache_rate(m)
@@ -608,6 +654,10 @@ def render(run: Run) -> str:
             out.append("  " + "  ".join(str(c).ljust(widths[i]) for i, c in enumerate(r)).rstrip())
     if data["aborted"]:
         out += ["", f"ABORTED: {data['aborted']}. Remaining cases were not run; this run is not used for comparisons."]
+    changed = run.provider_changes
+    if changed:
+        out += ["", f"WARNING: {len(changed)} provider change(s); those cases' metrics compare different models:"]
+        out += [f"  - [{ref.split(' ')[0]}] {case}: {row['metric']} {row['ref']} -> {row['cur']}" for ref, case, row in changed]
     bad = run.regressions
     out += ["", f"{len(bad)} regression(s)" + (":" if bad else ".")]
     out += [f"  - [{ref.split(' ')[0]}] {case}: {LABELS.get(row['metric'], row['metric'])} {fmt(row['ref'])} -> {fmt(row['cur'])}"

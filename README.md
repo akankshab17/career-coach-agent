@@ -21,12 +21,31 @@ LLM_MODEL=             # optional single model for both tasks (EXTRACT_MODEL / W
 EXTRACT_REASONING_EFFORT=   # low | medium | high; blank = low
 WRITE_REASONING_EFFORT=     # low | medium | high; blank = medium
 ```
-Reasoning effort is sent to Groq as `reasoning_effort` for gpt-oss models only; other providers and models ignore it. gpt-oss
+Reasoning effort is sent as `reasoning_effort` to Groq's gpt-oss models and OpenAI's reasoning models (gpt-5*, o1/o3/o4...);
+other models ignore it. gpt-oss
 "thinks" before answering and that hidden reasoning is billed as output tokens, so `low` makes the many small extraction
 calls much cheaper and faster. It is not part of the extraction cache key (cached facts are reused whatever the effort).
 
 The writer runs at temperature 0 with a fixed seed (`SAMPLING` in `src/llm.py`) so the same facts give nearly the same draft;
 Groq and OpenAI only promise best-effort determinism, so wording can still vary a little. Extraction stays at 0.2.
+OpenAI reasoning models reject a non-default temperature, so they get no temperature or seed.
+
+### Fallback when Groq's daily limit runs out
+```
+FALLBACK_PROVIDER=openai
+FALLBACK_EXTRACT_MODEL=gpt-5.6-luna
+FALLBACK_WRITE_MODEL=gpt-5.4-mini
+OPENAI_BUDGET_USD=3.00      # default 3.00
+```
+Only a Groq **daily** limit (`QuotaExceededError`) triggers it; per-minute limits still just wait and retry. The switch is per task
+(Groq's limits are per model: gpt-oss-20b and gpt-oss-120b run out separately) and lasts for the rest of the run (an eval run
+counts as one run); the next run starts on Groq again. The stderr log names the provider/model of every call
+(`[llm] extract via openai/gpt-5.6-luna [FALLBACK] effort=low in=... out=... $0.0012 (OpenAI total $0.41 of $3.00)`) and a
+`FALLBACK:` line marks the switch. Facts extracted by the fallback model are cached under that model, never under Groq's.
+Every OpenAI call's cost (tokens x `PRICES`) is added to `.cache/spend.json`, a running total across runs (delete it to start
+from zero). Once it reaches `OPENAI_BUDGET_USD` the fallback refuses to make more calls and the run stops with
+`BudgetExceededError` (evals abort, like a daily limit). A fallback model with no entry in `PRICES` is refused, since its spend
+couldn't be checked.
 
 OpenAI needs `OPENAI_API_KEY`; Groq needs `GROQ_API_KEY`. To see which models your key can use right now (e.g. if a default gets retired):
 ```
@@ -178,6 +197,9 @@ Options: `--cases a,b` (subset), `--no-cache` (redo extraction), `--no-fail` (ex
   `evals/baseline.json` (metrics only) is committed. Fixtures refuse to be written if they contain an API key.
 - **Table per case:** sources, full-text pages, facts by section, grounded, rejected, sentences dropped, rewrites, empty sections,
   fixture misses, latency, tokens. Results go to `evals/results/<timestamp>.json` (plus each brief, debug file and log).
+- **Provider per case:** each case records which provider/model served each task (`llm` in the results JSON and the table). If a
+  task's provider differs from the run it is compared with (e.g. the fallback kicked in), the table marks it `≠ CHANGED` and a
+  WARNING lists it: those metrics compare different models. It's a warning, not a regression (the exit code doesn't change).
 - **Comparison** with the previous run (same kind) and with the baseline; `▼ WORSE` marks a metric that got worse. Exit code 1 if
   any did, 2 if the run aborted (e.g. a daily LLM limit; aborted runs are never used for comparisons).
   Writer metrics (sentences dropped, rewrites) are flagged only if worse by more than 2. Extraction/grounding metrics are strict

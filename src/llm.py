@@ -1,9 +1,15 @@
 """The only file that knows about LLM providers.
 
 Everything else calls generate(system_prompt, user_prompt) -> text.
+
+Fallback: when Groq raises QuotaExceededError (a daily limit), that task's calls go to FALLBACK_PROVIDER /
+FALLBACK_EXTRACT_MODEL / FALLBACK_WRITE_MODEL for the rest of the run (reset_fallback() starts a new run). Groq's daily limits
+are per model, so the switch is per task. OpenAI spend is tracked in .cache/spend.json; past OPENAI_BUDGET_USD the fallback
+stops with BudgetExceededError.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
@@ -24,9 +30,16 @@ PRICES = {
     ("groq", "openai/gpt-oss-120b"): (0.0, 0.0),  # free tier
     ("groq", "openai/gpt-oss-20b"): (0.0, 0.0),
     ("openai", "gpt-4o-mini"): (0.15, 0.60),
+    ("openai", "gpt-5.6-luna"): (0.20, 1.20),
+    ("openai", "gpt-5.4-mini"): (0.75, 4.50),
 }
 
-# Reasoning effort for Groq's gpt-oss models. Extraction is many small, simple calls: "low" keeps the hidden
+FALLBACK_ENV = {"provider": "FALLBACK_PROVIDER", "extract": "FALLBACK_EXTRACT_MODEL", "write": "FALLBACK_WRITE_MODEL"}
+SPEND_PATH = os.path.join(".cache", "spend.json")  # running total of OpenAI spend, across runs (delete it to reset)
+BUDGET_ENV = "OPENAI_BUDGET_USD"
+DEFAULT_BUDGET_USD = 3.00
+
+# Reasoning effort for Groq's gpt-oss models and OpenAI's reasoning models (gpt-5*, o1/o3/o4...). Extraction is many small, simple calls: "low" keeps the hidden
 # reasoning (billed as output tokens) short. Writing is one call that must follow many rules: "medium".
 EFFORT_ENV = {"extract": "EXTRACT_REASONING_EFFORT", "write": "WRITE_REASONING_EFFORT"}
 DEFAULT_EFFORT = {"extract": "low", "write": "medium"}
@@ -36,6 +49,8 @@ EFFORTS = ("low", "medium", "high")
 # writer metrics (sentences dropped) swung 8 -> 0 on identical input at 0.2. Groq and OpenAI treat the seed as best effort.
 # Extraction keeps a little temperature; its results are cached, so it doesn't add run-to-run noise there.
 SAMPLING = {"extract": {"temperature": 0.2}, "write": {"temperature": 0.0, "seed": 7}}
+# OpenAI reasoning models reject any temperature but the default, so they get no sampling settings (and no determinism).
+OPENAI_REASONING_RE = re.compile(r"^(?:gpt-5|o[1-9])", re.I)
 
 MAX_OUTPUT_TOKENS = 16384  # reasoning models (gpt-oss) spend part of this on hidden reasoning
 RETRIES = 2  # retries after the first attempt -> 3 attempts total
@@ -55,6 +70,10 @@ class QuotaExceededError(FatalLLMError):
     """A daily limit (tokens/requests per day) or account quota is used up."""
 
 
+class BudgetExceededError(QuotaExceededError):
+    """The OpenAI fallback has spent OPENAI_BUDGET_USD. A QuotaExceededError, so runs and evals stop the same way."""
+
+
 @dataclass
 class CallRecord:
     provider: str
@@ -65,13 +84,25 @@ class CallRecord:
     cost: float | None
     reasoning_tokens: int | None = None  # part of output_tokens, when the provider reports it
     effort: str | None = None
+    task: str = ""
+    fallback: bool = False
 
 
 _calls: list[CallRecord] = []
+_fallback: dict[str, tuple[str, str]] = {}  # task -> (provider, model) it switched to in this run
 
 
-def get_settings(task: str = "write") -> tuple[str, str]:
-    """(provider, model) for a task. Model precedence: EXTRACT_MODEL/WRITE_MODEL, then LLM_MODEL, then the default."""
+def reset_fallback() -> None:
+    """Start a new run on the primary provider."""
+    _fallback.clear()
+
+
+def fallback_tasks() -> list[str]:
+    return sorted(_fallback)
+
+
+def primary_settings(task: str = "write") -> tuple[str, str]:
+    """(provider, model) from LLM_PROVIDER / EXTRACT_MODEL / WRITE_MODEL / LLM_MODEL, ignoring any fallback."""
     provider = (os.getenv("LLM_PROVIDER") or DEFAULT_PROVIDER).strip().lower()
     if provider not in DEFAULT_MODELS:
         raise LLMError(f"Unknown LLM_PROVIDER '{provider}'. Use one of: {', '.join(DEFAULT_MODELS)}.")
@@ -81,9 +112,36 @@ def get_settings(task: str = "write") -> tuple[str, str]:
     return provider, model
 
 
+def get_settings(task: str = "write") -> tuple[str, str]:
+    """(provider, model) that the next call for `task` will use: the fallback once this run switched to it, else the
+    primary. Model precedence: EXTRACT_MODEL/WRITE_MODEL, then LLM_MODEL, then the default."""
+    primary = primary_settings(task)
+    return _fallback.get(task, primary)
+
+
+def fallback_settings(task: str) -> tuple[str, str] | None:
+    """(provider, model) from FALLBACK_PROVIDER / FALLBACK_<TASK>_MODEL, or None when no fallback is configured."""
+    provider = (os.getenv(FALLBACK_ENV["provider"]) or "").strip().lower()
+    if not provider:
+        return None
+    if provider not in DEFAULT_MODELS:
+        raise FatalLLMError(f"Unknown {FALLBACK_ENV['provider']} '{provider}'. Use one of: {', '.join(DEFAULT_MODELS)}.")
+    model = (os.getenv(FALLBACK_ENV[task]) or "").strip() or DEFAULT_MODELS[provider][task]
+    return provider, model
+
+
+def is_reasoning_model(provider: str, model: str) -> bool:
+    return (provider == "groq" and "gpt-oss" in model.lower()) or (provider == "openai" and bool(OPENAI_REASONING_RE.match(model)))
+
+
+def sampling_for(task: str, provider: str, model: str) -> dict:
+    return {} if provider == "openai" and OPENAI_REASONING_RE.match(model) else SAMPLING[task]
+
+
 def get_reasoning_effort(task: str, provider: str, model: str) -> str | None:
-    """EXTRACT_/WRITE_REASONING_EFFORT for Groq's gpt-oss models; None (= don't send it) for anything else."""
-    if provider != "groq" or "gpt-oss" not in model.lower():
+    """EXTRACT_/WRITE_REASONING_EFFORT for Groq's gpt-oss models and OpenAI's reasoning models; None (= don't send it)
+    for anything else."""
+    if not is_reasoning_model(provider, model):
         return None
     raw = (os.getenv(EFFORT_ENV[task]) or "").strip().lower()
     effort = raw or DEFAULT_EFFORT[task]
@@ -111,7 +169,7 @@ def _chat(client, model: str, system_prompt: str, user_prompt: str, reasoning_ef
     """One chat-completions call (Groq and OpenAI share the shape). `sampling`: temperature (default 0.2) and an optional seed.
     Returns (text, input tokens, output tokens, reasoning tokens or None)."""
     extra = {"reasoning_effort": reasoning_effort} if reasoning_effort else {}
-    sampling = {"temperature": 0.2, **(sampling or {})}
+    sampling = {"temperature": 0.2} if sampling is None else sampling
     resp = client.chat.completions.create(
         model=model,
         **sampling,
@@ -200,18 +258,80 @@ def _classify(exc: Exception, provider: str, model: str) -> LLMError | float | N
     return None
 
 
+def budget_usd() -> float:
+    raw = (os.getenv(BUDGET_ENV) or "").strip()
+    try:
+        return float(raw) if raw else DEFAULT_BUDGET_USD
+    except ValueError:
+        raise FatalLLMError(f"{BUDGET_ENV} must be a number of dollars, e.g. 3.00 (got '{raw}'). Fix it in your .env file.")
+
+
+def load_spend() -> dict:
+    """{"openai_usd", "calls", "input_tokens", "output_tokens"} over every OpenAI call ever tracked (missing file = 0)."""
+    try:
+        with open(SPEND_PATH) as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        data = {}
+    return {"openai_usd": 0.0, "calls": 0, "input_tokens": 0, "output_tokens": 0, **data}
+
+
+def _add_spend(cost: float, in_tok: int, out_tok: int) -> dict:
+    spend = load_spend()
+    spend.update(openai_usd=round(spend["openai_usd"] + cost, 6), calls=spend["calls"] + 1,
+                 input_tokens=spend["input_tokens"] + in_tok, output_tokens=spend["output_tokens"] + out_tok)
+    os.makedirs(os.path.dirname(SPEND_PATH) or ".", exist_ok=True)
+    with open(SPEND_PATH, "w") as f:
+        json.dump(spend, f, indent=1)
+    return spend
+
+
+def _check_budget(provider: str, model: str) -> None:
+    """Before a fallback call to OpenAI: refuse once the tracked spend has reached the budget."""
+    if provider != "openai":
+        return
+    if (provider, model) not in PRICES:
+        raise FatalLLMError(f"Fallback model openai/{model} has no price in PRICES (src/llm.py), so its spend can't be checked "
+                            f"against {BUDGET_ENV}. Add its price or pick another FALLBACK_*_MODEL.")
+    spent, budget = load_spend()["openai_usd"], budget_usd()
+    if spent >= budget:
+        raise BudgetExceededError(
+            f"OpenAI fallback budget used up: ${spent:.2f} spent of {BUDGET_ENV}=${budget:.2f} (tracked in {SPEND_PATH}). "
+            f"Not calling openai/{model}. Wait for Groq's daily limit to reset, or raise {BUDGET_ENV} in .env.")
+
+
 def generate(system_prompt: str, user_prompt: str, task: str = "write") -> str:
-    """Call the configured model for `task` ("extract" or "write") and record tokens, latency and cost.
-    For Groq gpt-oss models the task's reasoning effort is sent along; other providers/models ignore it.
-    The task's SAMPLING (temperature, seed) is sent to every provider."""
+    """Call the model for `task` ("extract" or "write") and record tokens, latency and cost.
+
+    If Groq raises QuotaExceededError and a fallback is configured, this task switches to the fallback for the rest of
+    the run (the call is retried there). Reasoning effort goes to Groq gpt-oss and OpenAI reasoning models; the task's
+    SAMPLING (temperature, seed) to every model that accepts it."""
     provider, model = get_settings(task)
+    try:
+        return _generate_with(provider, model, task, system_prompt, user_prompt, fallback=task in _fallback)
+    except QuotaExceededError as exc:
+        if task in _fallback or provider != "groq" or isinstance(exc, BudgetExceededError):
+            raise
+        target = fallback_settings(task)
+        if target is None or target == (provider, model):
+            raise
+        _check_budget(*target)  # a fallback we can't pay for: fail now, with Groq's message kept
+        _fallback[task] = target
+        print(f"[llm] FALLBACK: {provider}/{model} hit its daily limit; {task} calls now go to {target[0]}/{target[1]} "
+              f"for the rest of this run", file=sys.stderr)
+        return _generate_with(*target, task, system_prompt, user_prompt, fallback=True)
+
+
+def _generate_with(provider: str, model: str, task: str, system_prompt: str, user_prompt: str, fallback: bool) -> str:
     effort = get_reasoning_effort(task, provider, model)
     call = _PROVIDERS[provider]
+    if fallback:
+        _check_budget(provider, model)
 
     for attempt in range(RETRIES + 1):
         start = time.perf_counter()
         try:
-            text, in_tok, out_tok, *rest = call(model, system_prompt, user_prompt, effort, sampling=SAMPLING[task])
+            text, in_tok, out_tok, *rest = call(model, system_prompt, user_prompt, effort, sampling=sampling_for(task, provider, model))
             reasoning = rest[0] if rest else None
             break
         except LLMError:
@@ -236,7 +356,13 @@ def generate(system_prompt: str, user_prompt: str, task: str = "write") -> str:
 
     price = PRICES.get((provider, model))
     cost = (in_tok * price[0] + out_tok * price[1]) / 1_000_000 if price else None
-    _calls.append(CallRecord(provider, model, in_tok, out_tok, latency, cost, reasoning, effort))
+    _calls.append(CallRecord(provider, model, in_tok, out_tok, latency, cost, reasoning, effort, task, fallback))
+    spend_note = ""
+    if provider == "openai" and cost is not None:
+        spend = _add_spend(cost, in_tok, out_tok)
+        spend_note = f" ${cost:.4f} (OpenAI total ${spend['openai_usd']:.2f} of ${budget_usd():.2f})" if fallback else f" ${cost:.4f}"
+    print(f"[llm] {task} via {provider}/{model}{' [FALLBACK]' if fallback else ''}"
+          f"{f' effort={effort}' if effort else ''} in={in_tok} out={out_tok}{spend_note}", file=sys.stderr)
     return text
 
 
@@ -263,9 +389,23 @@ def reset_usage() -> None:
     _calls.clear()
 
 
+def models_used() -> dict[str, list[str]]:
+    """{task: ["provider/model", ...]} over every call since reset_usage(), in first-use order."""
+    used: dict[str, list[str]] = {}
+    for c in _calls:
+        name = f"{c.provider}/{c.model}"
+        if name not in used.setdefault(c.task, []):
+            used[c.task].append(name)
+    return used
+
+
 def usage_totals() -> dict:
-    """Token and time totals over every call since reset_usage() (reasoning tokens counted when the provider reports them)."""
+    """Token and time totals over every call since reset_usage() (reasoning tokens counted when the provider reports them),
+    plus which provider/model served each task and the dollar cost of the calls with a price."""
     return {
+        "models": models_used(),
+        "fallback_calls": sum(c.fallback for c in _calls),
+        "cost": round(sum(c.cost or 0 for c in _calls), 6),
         "calls": len(_calls),
         "input": sum(c.input_tokens for c in _calls),
         "output": sum(c.output_tokens for c in _calls),
@@ -293,7 +433,7 @@ def summary_line() -> str:
     total_reasoning = _reasoning_total(_calls)
     by_model: dict[str, list[CallRecord]] = {}
     for c in _calls:
-        by_model.setdefault(c.model, []).append(c)
+        by_model.setdefault(f"{c.provider}/{c.model}" + (" [FALLBACK]" if c.fallback else ""), []).append(c)
     parts = []
     for model, calls in by_model.items():
         details = []
@@ -304,9 +444,14 @@ def summary_line() -> str:
         parts.append(f"{model} {len(calls)} calls in={sum(c.input_tokens for c in calls)} "
                      f"out={sum(c.output_tokens for c in calls)}" + (f" ({', '.join(details)})" if details else ""))
     reasoning_note = f" (of which reasoning={total_reasoning})" if total_reasoning is not None else ""
+    providers = "+".join(dict.fromkeys(c.provider for c in _calls))
+    fallback_note = ""
+    if any(c.fallback for c in _calls):
+        fallback_note = (f" | FALLBACK used for {', '.join(sorted({c.task for c in _calls if c.fallback}))}; "
+                         f"OpenAI spend so far ${load_spend()['openai_usd']:.2f} of ${budget_usd():.2f}")
     return (
-        f"[llm] provider={_calls[-1].provider} calls={len(_calls)} in={in_tok} tok out={out_tok} tok{reasoning_note} "
-        f"latency={latency:.1f}s est_cost={cost} | by model: {'; '.join(parts)}"
+        f"[llm] provider={providers} calls={len(_calls)} in={in_tok} tok out={out_tok} tok{reasoning_note} "
+        f"latency={latency:.1f}s est_cost={cost} | by model: {'; '.join(parts)}{fallback_note}"
     )
 
 

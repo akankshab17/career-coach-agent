@@ -23,7 +23,8 @@ The user is learning: build in small steps, explain design decisions, stop after
 - `src/facts.py` extraction prompt (`PROMPT_VERSION`), on-disk cache, `ground()`, hedges, wrong-subject check, location fact.
 - `src/brief.py` source ids/types, `RunStats` + debug report, writer prompt, `select_for_writing`, `check_body` (all finalize rules),
   citation normalizer, sentence splitter, section enforcement, rendering.
-- `src/llm.py` the ONLY file that knows providers (groq default, openai): model routing, retries, rate-limit classification, usage log.
+- `src/llm.py` the ONLY file that knows providers (groq default, openai): model routing, retries, rate-limit classification, usage log,
+  OpenAI fallback + spend tracking (`.cache/spend.json`).
 - `evals/` eval harness (below). `tests/` pytest; `tests/helpers.py` has the fakes (`fake_llm`, `res`, `fact`).
 
 ## Key design decisions (and why)
@@ -38,14 +39,19 @@ The user is learning: build in small steps, explain design decisions, stop after
   splits sentences that mix interview stages, keeps timelines out of TL;DR/prep/questions, blocks company news in prep/questions,
   always renders all six sections (placeholder if empty), opens TL;DR with "Limited interview data (N sources)" if < 3 interview facts.
 - **Model routing.** `EXTRACT_MODEL` (default groq `openai/gpt-oss-20b`: many small calls) vs `WRITE_MODEL` (`openai/gpt-oss-120b`: one call).
-  `LLM_MODEL` sets both. **Reasoning effort**: `EXTRACT_REASONING_EFFORT` default low, `WRITE_REASONING_EFFORT` default medium; sent only
-  to Groq gpt-oss models (hidden reasoning is billed as output tokens). Daily limits (TPD/RPD/quota) raise `QuotaExceededError` and stop
-  the run with the wait time; per-minute limits retry using the provider's wait (cap 30s).
+  `LLM_MODEL` sets both. **Reasoning effort**: `EXTRACT_REASONING_EFFORT` default low, `WRITE_REASONING_EFFORT` default medium; sent
+  to Groq gpt-oss and OpenAI reasoning models (gpt-5*, o*) (hidden reasoning is billed as output tokens). Daily limits (TPD/RPD/quota)
+  raise `QuotaExceededError`; per-minute limits retry using the provider's wait (cap 30s).
+- **Fallback.** A Groq `QuotaExceededError` switches THAT task (Groq limits are per model) to `FALLBACK_PROVIDER` /
+  `FALLBACK_EXTRACT_MODEL` / `FALLBACK_WRITE_MODEL` for the rest of the run (`llm.reset_fallback()` at the start of main and of an eval
+  run). Every call logs `[llm] <task> via <provider>/<model>`. OpenAI spend accumulates in `.cache/spend.json`; at `OPENAI_BUDGET_USD`
+  (default 3.00) the fallback raises `BudgetExceededError` (a `QuotaExceededError`, so runs/evals stop). No temperature/seed for OpenAI
+  reasoning models (they reject it). Tests redirect `SPEND_PATH` (conftest): never write the real spend file.
 - **Page purpose in the extraction prompt.** Told only the role, gpt-oss-20b at low effort returned `[]` for company profiles and
   careers pages that never name the role (Cummins: all 5 pages; Google: Forbes). The prompt now says what each page is for.
 - **Writer sampling**: temperature 0 + seed (`SAMPLING` in `llm.py`; best effort on Groq). Extraction stays at 0.2.
 - **Extraction cache** (`.cache/extract/`) key = prompt version + extraction model + URL + company/role/level + text kind + page purpose +
-  hash of the exact text read. NOT the reasoning effort. Bump `PROMPT_VERSION` only when the extraction prompt changes; a model change or different
+  hash of the exact text read. Facts from a fallback call are filed under the model that actually answered. NOT the reasoning effort. Bump `PROMPT_VERSION` only when the extraction prompt changes; a model change or different
   page text already gets a new key. Don't cache by URL alone: an empty result from reading a site menu once stuck forever.
 - **Source types**: `official-posting | company-site | third-party-guide | job-aggregator | forum/blog | news`. Official = JD, company posting,
   or careers page. No official text -> section 3 says so and labels each fact by source type. Official sources' facts are sent first.
@@ -65,7 +71,8 @@ The user is learning: build in small steps, explain design decisions, stop after
 - `python evals/run_evals.py --record` (live; the USER runs this: it spends Tavily credits and Groq tokens) -> `evals/fixtures/<case>/`.
   Default = replay (no Tavily; LLM still runs, extraction cache helps). `--from-facts` = writer + finalize only from `facts.json`
   (refreshed by every record/full replay). Other flags: `--cases a,b --no-cache --no-fail --set-baseline --list`, `--repeat N`
-  (writer + finalize N times per case from the same facts; writer metrics averaged).
+  (writer + finalize N times per case from the same facts; writer metrics averaged). Each case records the provider/model per task
+  (`llm`); a provider change vs the compared run is a `≠ CHANGED` warning, not a regression.
 - Prints a table per case, saves `evals/results/<timestamp>.json`, compares with the previous run and `evals/baseline.json`, flags worse
   metrics (writer metrics only if worse by > 2), exit 1 on regression, 2 if aborted (daily limit).
 - **Fixtures and results are gitignored** (third-party page text; repo is public). `evals/baseline.json` (metrics only) IS committed.

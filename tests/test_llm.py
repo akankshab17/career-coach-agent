@@ -26,8 +26,9 @@ def test_provider_switch(monkeypatch):
 
     assert calls == [("groq", "openai/gpt-oss-120b"), ("openai", "gpt-4o-mini"), ("openai", "custom-model")]
     line = llm.summary_line()
-    assert "provider=openai calls=3 in=3000 tok out=1500 tok" in line
-    assert "by model: openai/gpt-oss-120b 1 calls in=1000 out=500 (effort=medium); gpt-4o-mini 1 calls in=1000 out=500; custom-model 1 calls in=1000 out=500" in line
+    assert "provider=groq+openai calls=3 in=3000 tok out=1500 tok" in line
+    assert ("by model: groq/openai/gpt-oss-120b 1 calls in=1000 out=500 (effort=medium); openai/gpt-4o-mini 1 calls in=1000 out=500; "
+            "openai/custom-model 1 calls in=1000 out=500") in line
 
 
 def test_retries_then_clear_error(monkeypatch):
@@ -316,3 +317,118 @@ def test_chat_sends_temperature_and_seed():
     llm._chat(client, "m", "s", "u")
     assert (seen[0]["temperature"], seen[0]["seed"]) == (0.0, 7)
     assert seen[1]["temperature"] == 0.2 and "seed" not in seen[1]
+
+
+# ---- fallback to OpenAI when Groq hits a daily limit ----
+
+@pytest.fixture
+def fallback_env(monkeypatch):
+    """Groq answers until `state['groq_daily_limit']` is True, then raises a TPD error; OpenAI always answers."""
+    state = {"groq_daily_limit": False, "calls": []}
+
+    def groq(model, s, u, effort=None, sampling=None):
+        state["calls"].append(("groq", model, effort, sampling))
+        if state["groq_daily_limit"]:
+            raise RateLimitError(TPD)
+        return "groq text", 100, 50
+
+    def openai(model, s, u, effort=None, sampling=None):
+        state["calls"].append(("openai", model, effort, sampling))
+        return "openai text", 1_000_000, 100_000
+
+    monkeypatch.setitem(llm._PROVIDERS, "groq", groq)
+    monkeypatch.setitem(llm._PROVIDERS, "openai", openai)
+    monkeypatch.setenv("FALLBACK_PROVIDER", "openai")
+    monkeypatch.setenv("FALLBACK_EXTRACT_MODEL", "gpt-5.6-luna")
+    monkeypatch.setenv("FALLBACK_WRITE_MODEL", "gpt-5.4-mini")
+    llm.reset_usage()
+    return state
+
+
+def test_a_groq_daily_limit_switches_that_task_to_the_fallback_for_the_rest_of_the_run(fallback_env, capsys):
+    assert llm.generate("s", "u", task="extract") == "groq text"
+    fallback_env["groq_daily_limit"] = True
+    assert llm.generate("s", "u", task="extract") == "openai text"  # the failed call is retried on the fallback
+    assert llm.generate("s", "u", task="extract") == "openai text"  # sticky: Groq isn't tried again
+    assert [c[0] for c in fallback_env["calls"]] == ["groq", "groq", "openai", "openai"]
+    assert llm.get_settings("extract") == ("openai", "gpt-5.6-luna") and llm.primary_settings("extract")[0] == "groq"
+    assert llm.fallback_tasks() == ["extract"]
+    err = capsys.readouterr().err
+    assert "FALLBACK: groq/openai/gpt-oss-20b hit its daily limit; extract calls now go to openai/gpt-5.6-luna" in err
+    assert "[llm] extract via openai/gpt-5.6-luna [FALLBACK] effort=low" in err and "[llm] extract via groq/openai/gpt-oss-20b effort=low" in err
+
+    fallback_env["groq_daily_limit"] = False  # the writer has its own Groq model and limit: it is not switched
+    assert llm.generate("s", "u", task="write") == "groq text"
+    assert llm.models_used() == {"extract": ["groq/openai/gpt-oss-20b", "openai/gpt-5.6-luna"], "write": ["groq/openai/gpt-oss-120b"]}
+    assert "FALLBACK used for extract" in llm.summary_line()
+
+    llm.reset_fallback()  # a new run starts on Groq again
+    assert llm.get_settings("extract") == ("groq", "openai/gpt-oss-20b")
+
+
+def test_openai_reasoning_models_get_effort_and_no_temperature(fallback_env):
+    fallback_env["groq_daily_limit"] = True
+    llm.generate("s", "u", task="extract")
+    llm.generate("s", "u", task="write")
+    openai_calls = [c for c in fallback_env["calls"] if c[0] == "openai"]
+    assert openai_calls == [("openai", "gpt-5.6-luna", "low", {}), ("openai", "gpt-5.4-mini", "medium", {})]
+    assert llm.get_reasoning_effort("write", "openai", "o3-mini") == "medium"
+    assert llm.get_reasoning_effort("write", "openai", "gpt-4o-mini") is None  # not a reasoning model
+    assert llm.sampling_for("write", "openai", "gpt-4o-mini") == llm.SAMPLING["write"]
+
+
+def test_no_fallback_configured_or_other_errors_do_not_switch(fallback_env, monkeypatch):
+    monkeypatch.delenv("FALLBACK_PROVIDER")
+    fallback_env["groq_daily_limit"] = True
+    with pytest.raises(llm.QuotaExceededError):
+        llm.generate("s", "u", task="extract")
+    monkeypatch.setenv("FALLBACK_PROVIDER", "openai")
+
+    class AuthenticationError(Exception):
+        pass
+
+    monkeypatch.setitem(llm._PROVIDERS, "groq", lambda m, s, u, effort=None, **_: (_ for _ in ()).throw(AuthenticationError("401")))
+    with pytest.raises(llm.FatalLLMError, match="rejected the API key"):
+        llm.generate("s", "u", task="extract")  # a bad key is not a daily limit
+    assert llm.fallback_tasks() == []
+
+
+def test_openai_spend_is_tracked_and_priced(fallback_env):
+    fallback_env["groq_daily_limit"] = True
+    llm.generate("s", "u", task="extract")  # 1M in x $0.20 + 100k out x $1.20 = $0.32
+    llm.generate("s", "u", task="write")  # 1M in x $0.75 + 100k out x $4.50 = $1.20
+    spend = llm.load_spend()
+    assert spend["openai_usd"] == pytest.approx(1.52) and spend["calls"] == 2 and spend["input_tokens"] == 2_000_000
+    assert llm.usage_totals()["cost"] == pytest.approx(1.52) and llm.usage_totals()["fallback_calls"] == 2
+
+
+def test_the_fallback_stops_at_the_budget_with_a_clear_message(fallback_env, monkeypatch):
+    monkeypatch.setenv("OPENAI_BUDGET_USD", "1.00")
+    fallback_env["groq_daily_limit"] = True
+    llm.generate("s", "u", task="write")  # $1.20: over budget after this call
+    with pytest.raises(llm.BudgetExceededError, match=r"\$1.20 spent of OPENAI_BUDGET_USD=\$1.00"):
+        llm.generate("s", "u", task="write")
+    assert sum(c[0] == "openai" for c in fallback_env["calls"]) == 1  # refused before calling OpenAI again
+    with pytest.raises(llm.BudgetExceededError):  # the other task can't switch to a spent fallback either
+        llm.generate("s", "u", task="extract")
+    assert issubclass(llm.BudgetExceededError, llm.QuotaExceededError)  # runs and evals stop the same way
+
+
+def test_budget_default_and_bad_values(monkeypatch):
+    assert llm.budget_usd() == 3.00
+    monkeypatch.setenv("OPENAI_BUDGET_USD", "three")
+    with pytest.raises(llm.FatalLLMError, match="OPENAI_BUDGET_USD"):
+        llm.budget_usd()
+
+
+def test_a_fallback_model_without_a_price_is_refused(fallback_env, monkeypatch):
+    monkeypatch.setenv("FALLBACK_EXTRACT_MODEL", "gpt-9-unpriced")
+    fallback_env["groq_daily_limit"] = True
+    with pytest.raises(llm.FatalLLMError, match="no price"):
+        llm.generate("s", "u", task="extract")
+    assert not any(c[0] == "openai" for c in fallback_env["calls"])
+
+
+def test_prices_for_the_fallback_models():
+    assert llm.PRICES[("openai", "gpt-5.6-luna")] == (0.20, 1.20)
+    assert llm.PRICES[("openai", "gpt-5.4-mini")] == (0.75, 4.50)

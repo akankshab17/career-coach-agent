@@ -146,6 +146,10 @@ def extract_facts(source: dict, company: str, role: str, level: str, use_cache: 
         f"Page text{' (search snippet only)' if text_kind == 'snippet' else ''}:\n{text}"
     )
     facts = parse_facts(llm.generate(EXTRACT_SYSTEM_PROMPT, user, task="extract"))
+    served_by = "/".join(llm.get_settings("extract"))
+    if served_by != model_id:  # this call switched to the fallback model: file its facts under that model, not Groq's
+        model_id = served_by
+        path = _cache_path(source["url"], company, role, level, text_kind, model_id, text, purpose)
     os.makedirs(CACHE_DIR, exist_ok=True)
     with open(path, "w") as f:  # cached even when caching is off for reading, so the next normal run benefits
         json.dump({"url": source["url"], "prompt_version": PROMPT_VERSION, "model": model_id, "facts": facts}, f, indent=2)
