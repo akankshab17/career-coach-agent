@@ -13,7 +13,7 @@ from urllib.parse import urlparse
 
 import llm
 
-PROMPT_VERSION = "extract-v5"  # bump when EXTRACT_SYSTEM_PROMPT changes, so old cache entries are ignored
+PROMPT_VERSION = "extract-v6"  # bump when EXTRACT_SYSTEM_PROMPT changes, so old cache entries are ignored
 CACHE_DIR = os.path.join(".cache", "extract")
 SECTIONS = ("company", "interview", "role", "timeline")
 STAGES = ("oa", "phone-screen", "team-screen", "onsite", "unknown")
@@ -51,6 +51,7 @@ REJECT_REASONS = {
     "wrong-subject": "the fact is about the publishing site, another company, or isn't about the target company's own process/role",
     "undated-time-sensitive": "time-sensitive fact from an undated source",
     "duplicate": "same fact already grounded",
+    "faq-or-navigation": "the quote is a question from a FAQ or menu on the company's own site, not a fact",
 }
 
 EXTRACT_SYSTEM_PROMPT = f"""You extract facts for a student's interview-prep brief from ONE web page.
@@ -78,9 +79,14 @@ Rules:
   "team-screen" = team/hiring-manager conversation; "onsite" = onsite / virtual onsite / final loop.
   Use "unknown" when the text does not say which stage, e.g. general tips. One fact = one stage: if the
   quote covers several stages, make separate facts with separate quotes.
-- level (interview facts only; use "unknown" otherwise): the seniority of the candidate whose process the page describes:
+- level (interview and role facts; use "unknown" otherwise): for interview facts, the seniority of the candidate whose
+  process the page describes; for role facts, the seniority the role, program or posting is for (an intern program's
+  duties are "intern", a manager posting's requirements are "experienced"):
   "intern" = internship, "new-grad" = new graduate / university hire / entry level, "experienced" = full-time
-  industry hire, senior, staff, "unknown" = the page doesn't say.
+  industry hire, senior, staff, manager, "unknown" = the page doesn't say.
+- FAQ questions, menu and navigation links, buttons and headings are not facts ("Can I apply to multiple roles?",
+  "Check your application status", "Referral process"). Never quote one. Extract a FAQ's ANSWER only when it says
+  something concrete about the interview process or the role.
 - about_company: true ONLY if the fact is about the target company's own interview process, role, products or
   news. false if it is about the website or service that published the page (e.g. a prep site's own practice
   tool, course, mentors, pricing or feedback), about another company, or is generic with nothing specific to this company.
@@ -198,6 +204,18 @@ def about_publisher_not_company(fact: str, src: dict, company: str | None) -> st
     return label if re.search(rf"\b{re.escape(label)}\b", fact, re.I) else None
 
 
+def posting_level(src: dict) -> str | None:
+    """The level a job posting states in its title or URL ("Software Development Manager" -> experienced), or None when the
+    source isn't a posting or doesn't say. Program and careers pages often cover several levels: their facts keep the
+    extractor's per-fact level."""
+    from search import JOB_PATH_RE, explicit_level
+
+    if not (src.get("group") in ("posting", "role") or src.get("type") in ("official-posting", "job-aggregator")
+            or JOB_PATH_RE.search(src.get("url", ""))):
+        return None
+    return explicit_level(src)
+
+
 def ground(candidates: list[dict], sources: dict, already: list[dict] | None = None, company: str | None = None) -> tuple[list[dict], list[dict]]:
     """Keep candidates whose quote is really in their source. Returns (grounded, rejected).
 
@@ -226,6 +244,8 @@ def ground(candidates: list[dict], sources: dict, already: list[dict] | None = N
             reject(c, "quote-too-short")
         elif nquote not in normalize(text):
             reject(c, "quote-not-found")
+        elif src.get("kind") == "company" and quote.strip().endswith("?"):  # "Can I apply to multiple roles?"
+            reject(c, "faq-or-navigation")
         elif c.get("about_company") is False:
             reject(c, "wrong-subject")
         elif (brand := about_publisher_not_company(fact, src, company)):
@@ -244,6 +264,8 @@ def ground(candidates: list[dict], sources: dict, already: list[dict] | None = N
                 fact = add_hedge(fact)
             stage = c.get("stage") if c.get("stage") in STAGES else "unknown"
             level = c.get("level") if c.get("level") in LEVELS else "unknown"
+            if section == "role" and (posted := posting_level(src)):  # a posting's title/URL says its level outright
+                level = posted
             grounded.append({
                 "fact": fact,
                 "exact_quote": quote.strip(),
@@ -253,7 +275,7 @@ def ground(candidates: list[dict], sources: dict, already: list[dict] | None = N
                 "published_date": src.get("published_date"),
                 "grounded_in": text_kind,
                 "stage": stage if section == "interview" else "",
-                "level": level if section == "interview" else "",
+                "level": level if section in ("interview", "role") else "",
                 "hedged": hedged,
                 "source_type": src.get("type", ""),
                 "official": bool(src.get("official")),

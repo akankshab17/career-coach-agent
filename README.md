@@ -143,6 +143,8 @@ search -> fetch -> extract -> ground -> coverage --enough--> write -> finalize
    A posting must describe one job: GitHub repos of postings, "Jobs in New York" / "Job Board" / "Open Positions" pages and
    results pages full of "Apply now / Posted 2 days ago" lines are rejected (by title/URL, or by their text once fetched).
    glassdoor.* is blocked everywhere (never searched, extracted or cited).
+   The same page in two languages (`amazon.jobs/content/en/...` and `/content/pt/...`) is one source: URLs are compared
+   without scheme, `www.` and language segments, and the English variant is kept.
    Interview results are filtered for relevance: the company must be in the title or URL, and the role family
    (software, hardware, data, product...) must match, so an HPE post or a "Silicon/FPGA intern" post can't stand in for
    "Google Software Engineering Intern". What was filtered is logged and listed in the debug file. Stripe `/careers/apply/` URLs become `/careers/listing/`; if a posting page
@@ -151,7 +153,13 @@ search -> fetch -> extract -> ground -> coverage --enough--> write -> finalize
    `{fact, exact_quote, section, stage, level, about_company}`. `section` is `company`, `interview`, `role` or `timeline`
    (application dates and deadlines, which are not interview content).
    `stage` (interview facts): `oa`, `phone-screen`, `team-screen`, `onsite` or `unknown`.
-   `level` (interview facts): the seniority the source describes: `intern`, `new-grad`, `experienced` or `unknown`.
+   `level` (interview and role facts): the seniority the process, role or posting is for: `intern`, `new-grad`, `experienced`
+   or `unknown`. For a role fact from a job posting, a level stated in the posting's title/URL wins ("Software Development
+   Manager", "Senior", "Engineer II" = experienced). Role and interview facts for another level are sent to the writer only
+   after the candidate's own level, and are labelled in the brief ("(internship role)", "(experienced role)", "(full-time process)").
+   FAQ questions, menu items and headings are not facts: the prompt says so, and a quote that is a question on the company's
+   own site ("Can I apply to multiple roles?") is rejected as `faq-or-navigation`. Questions quoted in forum posts and guides
+   are kept (they are often real interview questions).
    `about_company`: false for facts about the publishing site (e.g. an interview-prep site's own practice tool) or another company.
    The extractor is told each page's purpose (`company`, `role` or `interview`, the same purpose page focus uses) and to extract
    what that page is good for even if it never mentions the role: told only the role, it returned nothing for company profiles
@@ -209,7 +217,7 @@ each dropped sentence and each forum rewrite. It goes to `<output>.debug.md` wit
 Only search/extract APIs are used — no scraping.
 
 ## Evals (record / replay)
-Four fixed cases (`evals/cases.yaml`: Google intern, Cummins new-grad SWE, Perplexity AI Engineer, Salesforce APM) are run
+Five fixed cases (`evals/cases.yaml`: Google intern, Cummins new-grad SWE, Perplexity AI Engineer, Salesforce APM, Amazon new-grad SDE) are run
 through the whole pipeline and scored, so a change can be checked for regressions instead of by eye.
 
 ```

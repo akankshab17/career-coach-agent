@@ -223,7 +223,7 @@ def test_extraction_uses_the_extract_task_and_model_is_part_of_the_cache_key(mon
     monkeypatch.setenv("EXTRACT_MODEL", "openai/gpt-oss-120b")  # different model: its own entry, same prompt version
     _, cached = facts.extract_facts(src, "Stripe", "SWE", "new-grad")
     assert cached is False and len(calls) == 2
-    assert facts.PROMPT_VERSION == "extract-v5"  # a model change doesn't bump the prompt version
+    assert facts.PROMPT_VERSION == "extract-v6"  # a model change doesn't bump the prompt version
 
     monkeypatch.delenv("EXTRACT_MODEL")  # back to the default model: first entry is still there
     _, cached = facts.extract_facts(src, "Stripe", "SWE", "new-grad")
@@ -282,7 +282,7 @@ def test_extraction_prompt_asks_for_level_and_subject():
     assert '"level": "intern|new-grad|experienced|unknown"' in facts.EXTRACT_SYSTEM_PROMPT
     assert "about_company" in facts.EXTRACT_SYSTEM_PROMPT and "website or service that published the page" in facts.EXTRACT_SYSTEM_PROMPT
     assert "is_forum" not in facts.EXTRACT_SYSTEM_PROMPT
-    assert facts.PROMPT_VERSION == "extract-v5"
+    assert facts.PROMPT_VERSION == "extract-v6"
 
 
 # ---- level tag ----
@@ -437,3 +437,31 @@ def test_facts_from_the_fallback_model_are_cached_under_that_model_not_groqs(mon
     monkeypatch.setitem(llm._PROVIDERS, "groq", lambda model, s, u, effort=None, **_: calls.append("groq") or ('{"facts": []}', 1, 1))
     assert facts.extract_facts(src, "Acme", "SWE", "new-grad") == ([], False)  # back on Groq: the fallback's entry isn't reused
     assert calls == ["groq", "openai", "groq"]
+
+
+# ---- FAQ items, role-fact levels ----
+
+def test_faq_questions_on_the_companys_own_site_are_rejected_but_a_forum_question_is_not():
+    page = "FAQ\n\nCan I apply to multiple roles?\n\nThey asked me: how would you design a URL shortener?"
+    company_src = {"S1": {"url": "https://amazon.jobs/sde", "title": "SDE", "full_text": page, "kind": "company"}}
+    forum_src = {"S1": {"url": "https://reddit.com/r/x/1", "title": "Amazon SDE loop", "full_text": page, "kind": "forum"}}
+    faq = cand("Candidates can apply to multiple roles.", "Can I apply to multiple roles?")
+    asked = cand("Candidates were asked to design a URL shortener.", "how would you design a URL shortener?")
+    kept, rejected = facts.ground([faq], company_src)
+    assert kept == [] and rejected[0]["reason"] == "faq-or-navigation"
+    kept, _ = facts.ground([asked], forum_src)
+    assert len(kept) == 1
+    assert "FAQ questions, menu and navigation links" in facts.EXTRACT_SYSTEM_PROMPT
+
+
+def test_role_facts_keep_their_level_and_a_postings_title_overrides_it():
+    page = "Interns build systems. Requires 8+ years of management experience."
+    program = {"S1": {"url": "https://amazon.jobs/content/en/university/sde", "title": "SDE programs", "full_text": page,
+                      "kind": "company", "group": "careers", "type": "company-site"}}
+    manager = {"S1": {"url": "https://www.amazon.jobs/en/jobs/1/software-development-manager", "title": "Software Development Manager",
+                      "full_text": page, "kind": "company", "group": "interview", "type": "official-posting"}}
+    intern_fact = {**cand("Interns build systems.", "Interns build systems", "role"), "level": "intern"}
+    years = {**cand("Requires 8+ years of management experience.", "Requires 8+ years of management experience", "role"), "level": "new-grad"}
+    assert facts.ground([intern_fact], program)[0][0]["level"] == "intern"  # the extractor's level, kept for role facts now
+    assert facts.ground([years], manager)[0][0]["level"] == "experienced"  # the posting's title wins over the extractor
+    assert facts.ground([{**cand("Acme sells tools.", "Interns build systems", "company"), "level": "intern"}], program)[0][0]["level"] == ""

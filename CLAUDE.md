@@ -41,7 +41,7 @@ The user is learning: build in small steps, explain design decisions, stop after
   facts (valuation, funding, `$X billion`, headcount) from undated sources, duplicates, wrong-subject facts (about the publishing
   site). Rejections are logged with reasons in the debug file. There is deliberately no second LLM verifier.
 - **Finalize is code-only**: drops uncited sentences and numbers not in the cited facts (years matching a source date are OK),
-  rewrites forum interview facts to "Candidates report", keeps hedges ("Reportedly"), labels other-level facts "(full-time process)",
+  rewrites forum interview facts to "Candidates report", keeps hedges ("Reportedly"), labels other-level interview/role facts ("(full-time process)", "(internship role)"),
   splits sentences that mix interview stages, keeps timelines out of TL;DR/prep/questions, blocks company news in prep/questions,
   always renders all six sections (placeholder if empty), opens TL;DR with "Limited interview data (N sources)" if < 3 interview facts.
   With no interview/role facts at all, empty sections 4-5 get code-written general guidance for the role family (`src/guidance.py`),
@@ -71,10 +71,15 @@ The user is learning: build in small steps, explain design decisions, stop after
   page's purpose (company pages: company words; careers/postings: role words; interview pages: process words). Career pages open with
   thousands of chars of menu, so taking the head gave the extractor only the menu. Reddit usually can't be fetched: the search
   snippet is used (grounded against the snippet, tagged `[snippet-grounded]`).
-- **Writer gets <= 30 facts**: interview + role first (spread across sources), >= 5 company facts, <= 4 timeline facts, pinned location fact.
+- **Writer gets <= 30 facts**: interview + role first (spread across sources; the candidate's level first), >= 5 company facts, <= 4
+  timeline facts, pinned location fact, and >= 3 interview slots for forum/blog reports when any exist (official pages rank
+  first and once took every slot).
+- **Levels on role facts too** (extract-v6): an intern program's duties or a manager posting's requirements are other-level role
+  facts; a posting's title/URL level (`search.explicit_level`) overrides the extractor. **Dedupe by `canonical_url`** (language
+  segments ignored, English kept). **FAQ/nav quotes** (a question on the company's own site) are rejected (`faq-or-navigation`).
 
 ## Eval harness (`evals/`)
-- Cases in `evals/cases.yaml` (Google intern, Cummins new-grad SWE, Perplexity AI Engineer, Salesforce APM). Record/replay happens at the
+- Cases in `evals/cases.yaml` (Google intern, Cummins new-grad SWE, Perplexity AI Engineer, Salesforce APM, Amazon new-grad SDE). Record/replay happens at the
   Tavily client, so all our logic runs in replay; only the network is replaced; the recording date is pinned.
 - `python evals/run_evals.py --record` (live; the USER runs this: it spends Tavily credits and Groq tokens) -> `evals/fixtures/<case>/`.
   Default = replay (no Tavily; LLM still runs, extraction cache helps). `--from-facts` = writer + finalize only from `facts.json`

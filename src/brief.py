@@ -9,7 +9,7 @@ from typing import Callable
 
 import guidance
 from facts import HEDGE_WORD_RE, LOWERABLE_STARTERS, NUMBER_RE, REJECT_REASONS, add_hedge
-from search import TYPE_LABEL, is_blocked, is_careers_page, source_kind, source_type
+from search import TYPE_LABEL, canonical_url, is_blocked, is_careers_page, prefers, source_kind, source_type
 
 JD_URL = "jd://user-provided"
 LEVEL_LABEL = {"intern": "intern", "new-grad": "new grad", "experienced": "experienced"}
@@ -20,6 +20,8 @@ TIMELINE_MAX = 4  # application-calendar facts sent to the writer
 NO_INTERVIEW = "No interview reports found."
 MIN_INTERVIEW_FACTS = 3  # fewer than this and the TL;DR opens with a "Limited interview data" warning
 LEVEL_PROCESS = {"intern": "internship process", "new-grad": "new-grad process", "experienced": "full-time process"}
+LEVEL_ROLE = {"intern": "internship role", "new-grad": "new-grad role", "experienced": "experienced role"}  # role-fact labels
+FORUM_RESERVE = 3  # interview slots kept for candidates' own reports (forum/blog) when there are any
 STAGE_ORDER = ("oa", "phone-screen", "team-screen", "onsite", "unknown")
 STAGE_LABEL = {"oa": "Online assessment", "phone-screen": "Phone screen", "team-screen": "Team screen",
                "onsite": "Onsite", "unknown": "Stage not specified"}
@@ -36,13 +38,20 @@ SECTION3_INFERRED = "## 3. What the role really needs (Inferred, not from a JD)"
 # ---------- sources ----------
 
 def add_sources(sources: dict[str, dict], results: list[dict], group: str, company: str) -> list[str]:
-    """Add results under new ids S<n> (skipping known URLs). Returns the new ids."""
-    known = {s["url"] for s in sources.values()}
+    """Add results under new ids S<n>, skipping pages already known (same URL, or the same page in another language:
+    an English variant replaces a known non-English one in place, keeping its id and group). Returns the new ids."""
+    known = {canonical_url(s["url"]): sid for sid, s in sources.items()}
     new_ids = []
     for r in results:
-        if r["url"] in known or is_blocked(r["url"]):
+        if is_blocked(r["url"]):
             continue
-        known.add(r["url"])
+        key = canonical_url(r["url"])
+        if key in known:
+            old = sources[known[key]]
+            if prefers(r["url"], old["url"]) and "full_text" not in old:  # not yet fetched: switch to the English page
+                old.update({k: r[k] for k in ("url", "title", "content", "published_date") if k in r})
+            continue
+        known[key] = f"S{len(sources) + 1}"
         sid = f"S{len(sources) + 1}"
         if r["url"] == JD_URL:  # the JD the user pasted is as official as it gets
             kind, stype, official = "jd", "official-posting", True
@@ -242,8 +251,9 @@ Rules:
 - Never write "the acquisition", "the deal", "the company" etc. without naming what it is in that sentence.
 - Facts marked CANDIDATE-REPORT are first-person interview experiences (Reddit, LeetCode, blogs): start those
   sentences with "Candidates report". Other facts are stated plainly.
-- Facts marked LEVEL-MISMATCH describe a different seniority level than the candidate's. Prefer other facts; if you use
-  one, end the sentence with the label shown on the fact, e.g. "(full-time process)".
+- Facts marked LEVEL-MISMATCH describe a different seniority level than the candidate's (another level's interview
+  process, or a role/posting for another level). Prefer other facts; if you use one, end the sentence with the label shown
+  on the fact, e.g. "(full-time process)" or "(internship role)".
 - Facts marked HEDGED come from a source that is unconfirmed ("may", "reportedly"). Keep the hedge in your
   sentence (e.g. "Reportedly, ..."); never state them as completed or certain.
 - Timeline facts (application dates, deadlines, decision timing) are NOT interview content: they go only under the
@@ -292,17 +302,25 @@ def select_for_writing(facts: list[dict], limit: int = MAX_WRITER_FACTS, level: 
     timeline = _ranked([f for f in pool if f["section"] == "timeline"])[:TIMELINE_MAX]
     limit -= len(pinned) + len(timeline)
     company = _ranked([f for f in pool if f["section"] == "company"], COMPANY_FACTS_PER_SOURCE)
-    interview_all = [f for f in pool if f["section"] == "interview"]
-    fits = [f for f in interview_all if not level or f.get("level") in (level, "unknown", "", None)]
-    interview = _ranked(fits) + _ranked([f for f in interview_all if f not in fits])
-    role = _ranked([f for f in pool if f["section"] == "role"])
+    def level_first(section: str) -> list[dict]:  # the candidate's level (or unknown) first; other levels only to fill
+        facts_ = [f for f in pool if f["section"] == section]
+        fits = [f for f in facts_ if not level_mismatch(f, level)]
+        return _ranked(fits) + _ranked([f for f in facts_ if f not in fits])
+
+    interview, role = level_first("interview"), level_first("role")
 
     reserve = min(COMPANY_RESERVE, len(company))
     room = limit - reserve
     interview_quota = min(len(interview), -(-room * 3 // 5))  # ~60% of the non-company room
     role_quota = min(len(role), room - interview_quota)
     interview_quota = min(len(interview), room - role_quota)  # unused role room flows to interview
-    chosen = interview[:interview_quota] + role[:role_quota]
+    picked = interview[:interview_quota]
+    reports = [f for f in interview if f.get("is_experience")][:min(FORUM_RESERVE, interview_quota)]
+    if reports and sum(f.get("is_experience", False) for f in picked) < len(reports):
+        # official pages rank first and can fill every interview slot; candidates' own reports keep FORUM_RESERVE of them
+        rest = [f for f in interview if f not in reports]
+        picked = reports + rest[:interview_quota - len(reports)]
+    chosen = picked + role[:role_quota]
     company_room = min(COMPANY_FACTS_FOR_WRITER, limit - len(chosen))
     chosen += company[:max(company_room, reserve)]
     keep = {id(f) for f in chosen} | {id(f) for f in pinned} | {id(f) for f in timeline}
@@ -314,8 +332,14 @@ def fact_ids(facts: list[dict]) -> dict[str, dict]:
 
 
 def level_mismatch(f: dict, level: str | None) -> bool:
-    """An interview fact whose source describes a different seniority level than the candidate's."""
-    return bool(level) and f["section"] == "interview" and f.get("level") in LEVEL_PROCESS and f["level"] != level
+    """An interview or role fact about a different seniority level than the candidate's (another level's process, an
+    intern program's duties in a new-grad brief, a manager posting's requirements)."""
+    return bool(level) and f["section"] in ("interview", "role") and f.get("level") in LEVEL_PROCESS and f["level"] != level
+
+
+def level_label(f: dict) -> str:
+    """'full-time process' for an interview fact, 'experienced role' for a role fact."""
+    return (LEVEL_ROLE if f["section"] == "role" else LEVEL_PROCESS)[f["level"]]
 
 
 def _fact_line(fid: str, f: dict, level: str | None = None) -> str:
@@ -325,7 +349,7 @@ def _fact_line(fid: str, f: dict, level: str | None = None) -> str:
     if f.get("level") in LEVEL_PROCESS:
         tags.append(f"level {f['level']}")
     if level_mismatch(f, level):
-        tags.append(f"LEVEL-MISMATCH, label \"({LEVEL_PROCESS[f['level']]})\"")
+        tags.append(f"LEVEL-MISMATCH, label \"({level_label(f)})\"")
     if f.get("is_experience"):
         tags.append("CANDIDATE-REPORT")
     if f.get("hedged"):
@@ -472,7 +496,7 @@ def fact_sentence(fid: str, f: dict) -> str:
     return f"{f['fact'].rstrip('. ')} [{fid}]."
 
 
-LEVEL_LABEL_RE = re.compile(r"\((?:internship|intern|new[- ]grad|full-time|other-level)[^)]*\)", re.I)
+LEVEL_LABEL_RE = re.compile(r"\((?:internship|intern|new[- ]grad|full-time|experienced|other[- ]level)[^)]*\)", re.I)
 
 
 def add_level_label(sentence: str, label: str) -> str:
@@ -594,9 +618,12 @@ def check_body(body: str, facts: list[dict], stats: RunStats, sources: dict | No
                 new = attribute_to_candidates(sent)
                 stats.rewrites.append(Rewrite(section, sent, new, "candidates-report"))
                 sent = new
-            wrong_level = sorted({by_id[i]["level"] for i in valid if level_mismatch(by_id[i], level)})
+            mismatched = [by_id[i] for i in valid if level_mismatch(by_id[i], level)]
+            wrong_level = sorted({level_label(f) for f in mismatched})
             if wrong_level and not LEVEL_LABEL_RE.search(sent):
-                label = LEVEL_PROCESS[wrong_level[0]] if len(wrong_level) == 1 else "other-level processes"
+                kinds = {f["section"] for f in mismatched}
+                label = wrong_level[0] if len(wrong_level) == 1 else (
+                    "other-level processes" if kinds == {"interview"} else "other-level roles" if kinds == {"role"} else "other levels")
                 new = add_level_label(sent, label)
                 stats.rewrites.append(Rewrite(section, sent, new, "level-label"))
                 sent = new

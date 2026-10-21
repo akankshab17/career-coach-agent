@@ -422,13 +422,43 @@ def fetch_full_text(sources: dict[str, dict], focus: list[str] | dict[str, list[
     return fetched, len(wanted) - fetched
 
 
+# Language segments in URL paths: amazon.jobs/content/en/... and /content/pt/... are one page in two languages.
+LANGUAGES = ("en", "pt", "es", "fr", "de", "it", "ja", "ko", "zh", "nl", "pl", "sv", "tr", "ru", "ar", "hi", "id", "th", "vi", "he",
+             "da", "fi", "nb", "no", "cs", "hu", "ro", "uk", "el")
+LANG_SEGMENT_RE = re.compile(rf"^(?:{'|'.join(LANGUAGES)})(?:[-_][a-z]{{2,4}})?$", re.I)  # en, pt-br, en_GB, zh-hans
+
+
+def url_language(url: str) -> str | None:
+    """The language code in the URL path ('en' for /content/en-us/...), or None."""
+    for seg in urlparse(url).path.split("/"):
+        if LANG_SEGMENT_RE.match(seg):
+            return seg[:2].lower()
+    return None
+
+
+def canonical_url(url: str) -> str:
+    """One key for every language/host variant of a page: no scheme, no 'www.', no language segments, no trailing slash."""
+    u = urlparse(url)
+    path = "/".join(seg for seg in u.path.split("/") if seg and not LANG_SEGMENT_RE.match(seg))
+    return f"{_host(url)}/{path}" + (f"?{u.query}" if u.query else "")
+
+
+def prefers(new_url: str, old_url: str) -> bool:
+    """Between two variants of one page, English (or no language marked) beats any other language."""
+    return url_language(new_url) in ("en", None) and url_language(old_url) not in ("en", None)
+
+
 def _dedupe(results: list[dict]) -> list[dict]:
-    seen: set[str] = set()
-    out = []
+    """One result per page: the same URL, or the same page in another language (the English variant is kept)."""
+    index: dict[str, int] = {}
+    out: list[dict] = []
     for r in results:
-        if r["url"] not in seen:
-            seen.add(r["url"])
+        key = canonical_url(r["url"])
+        if key not in index:
+            index[key] = len(out)
             out.append(r)
+        elif prefers(r["url"], out[index[key]]["url"]):
+            out[index[key]] = r
     return out
 
 
@@ -460,6 +490,20 @@ def classify_level(result: dict) -> str:
             r"\b(?:senior|sr)\b", text):  # "Associate Product Manager", not "Associate Director" / "Senior Associate"
         return "new-grad"
     return "experienced"
+
+
+SENIOR_RE = re.compile(r"\b(?:senior|sr\.?|staff|principal|lead|manager|director|head of|vp)\b|"
+                       r"\b(?:engineer|developer|scientist|analyst)[\s_-]+(?:ii|iii|iv|[2-5])\b", re.I)
+
+
+def explicit_level(result: dict) -> str | None:
+    """The level a title/URL states outright: intern / new-grad markers (as in classify_level) or senior markers
+    (senior, staff, lead, manager, "Engineer II"...). None when it says nothing (classify_level would guess 'experienced')."""
+    level = classify_level(result)
+    if level != "experienced":
+        return level
+    text = f"{result.get('title', '')} {result.get('url', '')}".replace("-", " ").replace("_", " ")
+    return "experienced" if SENIOR_RE.search(text) else None
 
 
 def posting_location_class(result: dict, location: str | None) -> str:
@@ -659,4 +703,5 @@ def search_more(company: str, role: str, level: str, section: str, known_urls: s
         results += [r for r in own if r["url"] not in known_urls][:2]
     else:
         raise ValueError(f"no follow-up search for section {section!r}")
-    return [r for r in _dedupe(results) if r["url"] not in known_urls]
+    known = {canonical_url(u) for u in known_urls}
+    return [r for r in _dedupe(results) if canonical_url(r["url"]) not in known]

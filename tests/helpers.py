@@ -48,4 +48,5 @@ def fact(fact_text, quote, section, source_id="S1", is_experience=False, publish
     return {"fact": fact_text, "exact_quote": quote, "section": section, "is_experience": is_experience,
             "source_id": source_id, "published_date": published, "grounded_in": "full",
             "stage": (stage or "unknown") if section == "interview" else "",
-            "level": (level or "unknown") if section == "interview" else "", "hedged": hedged, "pinned": pinned}
+            "level": (level or "unknown") if section == "interview" else (level or "") if section == "role" else "",
+            "hedged": hedged, "pinned": pinned}

@@ -23,3 +23,9 @@ cases:
     role: Associate Product Manager
     level: new-grad
     location: United States
+
+  - name: amazon-sde-new-grad
+    company: Amazon
+    role: Software Developer
+    level: new-grad
+    location: United States

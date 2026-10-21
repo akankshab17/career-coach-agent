@@ -774,3 +774,40 @@ def test_general_guidance_is_not_used_when_interview_or_role_facts_exist():
 def test_a_role_with_no_known_family_gets_generic_guidance():
     assert "typical for roles like this one" in brief.guidance.section_text("questions", "Chief Happiness Officer")
     assert "typical for software engineering roles" in brief.guidance.section_text("prep", "Backend Engineer")
+
+
+def test_english_replaces_a_known_other_language_variant_in_place():
+    sources = brief.collect_sources({"careers": [res(1, "SDE (pt)", "https://www.amazon.jobs/content/pt/university/sde")],
+                                     "company": [res(2, "SDE", "https://amazon.jobs/content/en/university/sde")]}, "Amazon")
+    assert list(sources) == ["S1"] and sources["S1"]["url"] == "https://amazon.jobs/content/en/university/sde"
+    assert sources["S1"]["group"] == "careers"
+
+
+# ---- role facts at other levels; forum reports keep their place ----
+
+def test_role_facts_for_another_level_are_labelled_and_ranked_last():
+    facts_ = [
+        fact("Interns build systems.", "q1", "role", "S1", level="intern"),
+        fact("Requires a STEM degree.", "q2", "role", "S1", level="new-grad"),
+        fact("Requires 8+ years leading teams.", "q3", "role", "S2", level="experienced"),
+        fact("Work on distributed systems.", "q4", "role", "S1", level="unknown"),
+    ]
+    assert [f["fact"] for f in brief.select_for_writing(facts_, limit=7, level="new-grad")][:4] == [f["fact"] for f in facts_]
+    picked = brief.select_for_writing(facts_ + [fact(f"Co fact {i}.", f"c{i}", "company", f"S{10 + i}") for i in range(5)], limit=7, level="new-grad")
+    assert "Interns build systems." not in [f["fact"] for f in picked] and "Requires 8+ years leading teams." not in [f["fact"] for f in picked]
+    body = ("## 3. What the role really needs\n- Interns build systems [F1].\n- STEM degree [F2].\n- 8+ years leading teams [F3].\n"
+            "- Distributed systems [F4].\n")
+    out = brief.check_body(body, facts_, RunStats(), level="new-grad")
+    assert "Interns build systems (internship role) [F1]." in out and "8+ years leading teams (experienced role) [F3]." in out
+    assert "STEM degree [F2]." in out and "Distributed systems [F4]." in out
+    _, user = brief.build_writer_prompt("Acme", "SWE", "new-grad", facts_, SOURCES, TODAY)
+    assert 'LEVEL-MISMATCH, label "(internship role)"' in user
+
+
+def test_forum_reports_keep_three_interview_slots_when_official_facts_would_fill_them():
+    official = [{**fact(f"Official step {i}.", f"o{i}", "interview", "S1"), "official": True} for i in range(20)]
+    reports = [fact(f"A candidate's round {i}.", f"r{i}", "interview", f"S{i + 2}", is_experience=True) for i in range(5)]
+    picked = brief.select_for_writing(official + reports, limit=10, level="new-grad")
+    assert sum(f["is_experience"] for f in picked) == 3 and len([f for f in picked if f["section"] == "interview"]) == 10
+    picked = brief.select_for_writing(official + reports[:1], limit=10, level="new-grad")
+    assert sum(f["is_experience"] for f in picked) == 1  # fewer reports than the reserve: all of them

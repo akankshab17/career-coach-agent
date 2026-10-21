@@ -621,3 +621,34 @@ def test_the_careers_search_also_asks_the_company_domain_directly(monkeypatch):
     out = search.search_more("Salesforce", "Associate Product Manager", "new-grad", "role", known_urls={"https://investor.salesforce.com/news/1"})
     assert apm["url"] in [r["url"] for r in out]
     assert any(kw.get("include_domains") == ["salesforce.com"] for _, kw in calls)
+
+
+# ---- one page in two languages is one source ----
+
+def test_language_variants_share_a_canonical_url_and_english_wins():
+    en = "https://amazon.jobs/content/en/career-programs/university/sde"
+    pt = "https://www.amazon.jobs/content/pt/career-programs/university/sde"
+    assert search.canonical_url(en) == search.canonical_url(pt) == "amazon.jobs/content/career-programs/university/sde"
+    assert search.canonical_url("https://advertising.amazon.com/en-ca/careers/x/") == "advertising.amazon.com/careers/x"
+    assert (search.url_language(pt), search.url_language(en), search.url_language("https://acme.com/jobs/1")) == ("pt", "en", None)
+    assert search.canonical_url("https://www.salesforce.com/ap") != search.canonical_url("https://www.salesforce.com/")  # "ap" isn't a language
+    assert [r["url"] for r in search._dedupe([res(1, url=pt), res(2, url=en), res(3, url=en)])] == [en]
+
+
+def test_search_more_skips_language_variants_of_known_pages(monkeypatch):
+    pt = res(1, "Software Engineer, New Grad", "https://acme.com/pt/jobs/1")
+    monkeypatch.setattr(search, "search", lambda q, client=None, **kw: [pt])
+    assert search.search_more("Acme", "Software Engineer", "new-grad", "role", known_urls={"https://acme.com/en/jobs/1"}) == []
+
+
+@pytest.mark.parametrize("title,url,level", [
+    ("Software Development Manager, Frontier", "https://www.amazon.jobs/en/jobs/10581336/software-development-manager-frontier", "experienced"),
+    ("Senior Software Engineer", "https://x.com/1", "experienced"),
+    ("Software Engineer II", "https://x.com/2", "experienced"),
+    ("Software Development Engineer - 2026 (US)", "https://www.amazon.jobs/en/jobs/3177934/software-development-engineer-2026-us", None),
+    ("Software Engineer, New Grad", "https://x.com/3", "new-grad"),
+    ("SDE Intern", "https://x.com/4", "intern"),
+    ("Solutions Architect, Tech U", "https://x.com/5", None),  # an entry-level track at AWS: no level claimed
+])
+def test_explicit_level_only_reports_what_a_title_states(title, url, level):
+    assert search.explicit_level(res(1, title, url)) == level
