@@ -12,8 +12,13 @@ ENV PYTHONUNBUFFERED=1 \
     MAX_BRIEFS_PER_DAY=5 \
     EXTRACT_CONCURRENCY=2
 
-# Hugging Face runs Spaces as uid 1000; the app writes .cache/ (jobs.db, extraction cache, spend.json) in its home.
-RUN useradd --create-home --uid 1000 user
+# Hugging Face runs Spaces as uid 1000; the app writes .cache/ (jobs.db, extraction cache, spend.json) under its working
+# directory. WORKDIR alone would create /home/user/app owned by root (PermissionError on '.cache'), so the directory and
+# .cache/ are created and handed to the user here, before USER.
+RUN useradd --create-home --uid 1000 user \
+    && mkdir -p /home/user/app/.cache \
+    && chown -R user:user /home/user/app
+ENV HOME=/home/user
 WORKDIR /home/user/app
 
 COPY --chown=user requirements.txt .

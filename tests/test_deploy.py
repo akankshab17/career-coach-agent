@@ -1,5 +1,6 @@
 """Production settings: the access code is mandatory, briefs are private, a daily cap on new briefs, and the image files
 keep secrets and the API out of reach."""
+import os
 from datetime import timedelta
 from pathlib import Path
 
@@ -146,3 +147,44 @@ def test_the_image_keeps_secrets_out_and_production_settings_on():
     assert "--host 127.0.0.1 --port 8000" in start and "--server.address 0.0.0.0" in start  # only Streamlit is reachable
     readme = (ROOT / "README.md").read_text()
     assert readme.startswith("---\n") and "sdk: docker" in readme and "app_port: 7860" in readme  # the Space's config
+
+
+# ---- the container can write its .cache ----
+
+def test_the_dockerfile_hands_the_app_directory_and_cache_to_the_user_before_switching():
+    """Local run failed: PermissionError on '.cache' because WORKDIR created /home/user/app owned by root."""
+    lines = [l.strip() for l in (ROOT / "Dockerfile").read_text().splitlines()]
+    instructions = " ".join(lines).replace("\\ ", " ")  # join continued lines
+    user_at = next(i for i, l in enumerate(lines) if l == "USER user")
+    before_user = " ".join(lines[:user_at])
+    assert "mkdir -p /home/user/app/.cache" in before_user and "chown -R user:user /home/user/app" in before_user
+    assert "WORKDIR /home/user/app" in instructions
+    assert instructions.index("chown -R user:user /home/user/app") < instructions.index("WORKDIR /home/user/app")
+    # every file the app writes lives under WORKDIR/.cache (read from the source: conftest points these at temp dirs)
+    for module, name in (("facts", "CACHE_DIR"), ("jobs", "DB_PATH"), ("llm", "SPEND_PATH")):
+        source = (ROOT / "src" / f"{module}.py").read_text()
+        assert f'{name} = os.path.join(".cache", ' in source, (module, name)
+
+
+def _docker_ready() -> bool:
+    import shutil
+    import subprocess
+
+    if os.getenv("RUN_DOCKER_TESTS") != "1" or not shutil.which("docker"):
+        return False
+    return subprocess.run(["docker", "info"], capture_output=True).returncode == 0
+
+
+@pytest.mark.skipif(not _docker_ready(), reason="set RUN_DOCKER_TESTS=1 with Docker running to build the image (slow)")
+def test_the_image_runs_as_uid_1000_and_can_write_its_cache():
+    import subprocess
+
+    tag = "interview-brief-test"
+    subprocess.run(["docker", "build", "-q", "-t", tag, str(ROOT)], check=True, capture_output=True, timeout=900)
+    probe = ("import os, sys; sys.path.insert(0, 'src'); from jobs import JobStore; JobStore(); "
+             "open('.cache/extract-probe', 'w').write('x'); print(os.getuid(), sorted(os.listdir('.cache')))")
+    out = subprocess.run(["docker", "run", "--rm", "--entrypoint", "python", tag, "-c", probe],
+                         check=True, capture_output=True, text=True, timeout=120).stdout
+    assert out.startswith("1000 ") and "jobs.db" in out and "extract-probe" in out
+    refused = subprocess.run(["docker", "run", "--rm", tag], capture_output=True, text=True, timeout=120)
+    assert refused.returncode != 0 and "APP_ACCESS_CODE" in refused.stdout + refused.stderr

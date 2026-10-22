@@ -38,7 +38,8 @@ The user is learning: build in small steps, explain design decisions, stop after
   403; the app lists only this browser session's briefs), `MAX_BRIEFS_PER_DAY=5` (Tavily free plan: 1,000 credits/month; new briefs per UTC day, all users; reuse
   is free; 429 with the reset time). Free Space disk is ephemeral: jobs.db, extraction cache and spend.json reset on
   restart; the user's prepaid OpenAI balance (auto-reload off) is the real fallback cap. `requirements.txt` = pinned
-  runtime deps; `requirements-dev.txt` adds pytest.
+  runtime deps; `requirements-dev.txt` adds pytest. The Dockerfile creates /home/user/app/.cache and chowns it to uid 1000
+  before `USER` (WORKDIR alone makes it root-owned); `RUN_DOCKER_TESTS=1` runs the real image test.
 - `evals/` eval harness (below). `tests/` pytest; `tests/helpers.py` has the fakes (`fake_llm`, `res`, `fact`).
   `tests/test_api.py` (TestClient + `fake_runner`), `tests/test_app.py` (Streamlit AppTest routed into the TestClient).
 

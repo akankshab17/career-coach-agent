@@ -189,7 +189,9 @@ git push --force space main          # username: your HF username, password: the
 pytest
 ```
 `tests/test_api.py` covers the API (fake pipeline, temporary database); `tests/test_app.py` drives `app.py` with Streamlit's
-`AppTest` against that API. Neither makes network calls.
+`AppTest` against that API. Neither makes network calls. `RUN_DOCKER_TESTS=1 pytest tests/test_deploy.py` also builds the
+Docker image and checks it runs as uid 1000, can write `.cache/`, and refuses to start without an access code (about a
+minute; skipped unless Docker is running).
 
 `--level` is `intern`, `new-grad` or `experienced`; the default is `new-grad`. Postings at other levels are ignored
 (a title with "Engineer I", "Associate" or "Entry Level" counts as new-grad). A posting must be the company's own: the company
