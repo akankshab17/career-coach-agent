@@ -74,7 +74,7 @@ def test_extract_batches_and_reports_failures(capsys):
         def __init__(self):
             self.batches = []
 
-        def extract(self, urls):
+        def extract(self, urls, **options):
             self.batches.append(len(urls))
             if len(self.batches) == 2:
                 raise TimeoutError("slow")
@@ -173,7 +173,7 @@ def test_clean_page_text_drops_link_markup_so_post_fits_in_the_cap():
 
 def test_extract_cleans_before_capping():
     class Client:
-        def extract(self, urls):
+        def extract(self, urls, **options):
             return {"results": [{"url": urls[0], "raw_content": LEETCODE_PAGE}]}
 
     text = search.extract(["https://leetcode.com/discuss/post/8372404"], client=Client())["https://leetcode.com/discuss/post/8372404"]
@@ -265,7 +265,7 @@ def test_extract_never_sends_glassdoor_urls(capsys):
         def __init__(self):
             self.sent = []
 
-        def extract(self, urls):
+        def extract(self, urls, **options):
             self.sent += urls
             return {"results": [{"url": u, "raw_content": "page text"} for u in urls]}
 
@@ -352,7 +352,7 @@ def test_focus_keywords_use_the_role_level_and_generic_words_but_not_the_company
 
 def test_extract_returns_the_whole_cleaned_page_and_fetch_focuses_it(monkeypatch):
     class Client:
-        def extract(self, urls):
+        def extract(self, urls, **options):
             return {"results": [{"url": urls[0], "raw_content": MENU + CONTENT}]}
 
     text = search.extract(["https://acme.com/careers/new-grads"], client=Client())["https://acme.com/careers/new-grads"]
@@ -728,3 +728,55 @@ def test_listing_pages_are_dropped_before_filtering_and_counted(monkeypatch):
     assert [(f["url"], f["reason"]) for f in research["filtered"]] == [(home["url"], "forum-listing-page"), (other_post["url"], "other-company")]
     assert research["forum_counts"] == {"found": 3, "listing": 1, "kept": 1}
     assert [q for q in queries if q.startswith("site:")] == search.forum_queries("Amazon", "Software Developer", "new-grad")
+
+
+# ---- Tavily credits ----
+
+def test_credits_are_taken_from_the_response_or_estimated_from_the_price_list():
+    class Client:
+        def __init__(self, usage):
+            self.usage = usage
+
+        def search(self, query, max_results, **options):
+            assert options["include_usage"] is True
+            return {"results": [], **({"usage": {"credits": self.usage}} if self.usage is not None else {})}
+
+        def extract(self, urls, **options):
+            assert options["include_usage"] is True
+            out = {"results": [{"url": u, "raw_content": "text"} for u in urls[:-1]], "failed_results": [{"url": urls[-1]}]}
+            return {**out, **({"usage": {"credits": self.usage}} if self.usage is not None else {})}
+
+    before = search.credits_used()
+    search.search("q", client=Client(usage=2))  # reported (an advanced search costs 2)
+    search.search("q", client=Client(usage=None))  # old fixture: basic search = 1
+    search.search("q", client=Client(usage=None), search_depth="advanced")  # = 2
+    search.extract([f"https://x.com/{i}" for i in range(12)], client=Client(usage=None))  # 11 pages returned -> 3 credits
+    search.extract(["https://x.com/a", "https://x.com/b"], client=Client(usage=0.5))
+    assert search.credits_used() - before == 2 + 1 + 2 + 3 + 0.5
+
+
+def test_each_step_logs_its_credits_and_the_pipeline_line_has_the_total(monkeypatch, capsys):
+    from datetime import date
+
+    import graph
+    import llm
+    from helpers import fake_llm
+
+    def gather(company, role, level, jd, today=None, **kw):
+        search._charge({"usage": {"credits": 9}}, 0)
+        return {"company": [res(1, url="https://news.example.com/a")], "posting": [], "filtered": []}
+
+    def fetch(sources, focus=None, company="", location=None):
+        search._charge({}, 2)  # no usage reported: the estimate counts
+        return 0, 0
+
+    monkeypatch.setattr(graph, "gather_research", gather)
+    monkeypatch.setattr(graph, "fetch_full_text", fetch)
+    monkeypatch.setattr(graph, "search_more", lambda *a, **k: (search._charge({"usage": {"credits": 2}}, 0), [])[1])  # 2 per section, 2 sections
+    monkeypatch.setattr(llm, "generate", fake_llm({}, "## TL;DR\nNo grounded information found for this section.\n"))
+    result = graph.run_pipeline("Acme", "SWE", "new-grad", None, today=date(2026, 10, 22))
+    err = capsys.readouterr().err
+    assert "; tavily credits: 9" in next(l for l in err.splitlines() if l.startswith("[search]"))
+    assert "; tavily credits: 2" in next(l for l in err.splitlines() if l.startswith("[fetch]"))
+    assert "; tavily credits: 4" in next(l for l in err.splitlines() if l.startswith("[search_more]"))
+    assert result.stats.tavily_credits == 9 + 2 + 2 + 4 and "tavily_credits=17" in err  # fetch ran twice (before/after retry)

@@ -139,6 +139,7 @@ class RunStats:
     drops: list[Drop] = field(default_factory=list)
     rewrites: list[Rewrite] = field(default_factory=list)
     general_sections: list[str] = field(default_factory=list)  # sections filled with code-written general guidance
+    tavily_credits: float = 0.0  # Tavily credits this brief used (search + fetch + follow-up search)
     # progress callback (the web app's worker): on_progress(step, None) when a step starts, (None, line) for each log line
     on_progress: Callable[[str | None, str | None], None] | None = field(default=None, repr=False, compare=False)
 
@@ -146,7 +147,8 @@ class RunStats:
         retry = f"yes ({', '.join(self.retry_sections)})" if self.retry_sections else "no"
         return (
             f"[pipeline] sources={self.sources_total} with_text={self.sources_with_text} "
-            f"extracted={self.facts_extracted} grounded={self.facts_grounded} rejected={len(self.rejected)} retry={retry}"
+            f"extracted={self.facts_extracted} grounded={self.facts_grounded} rejected={len(self.rejected)} retry={retry} "
+            f"tavily_credits={self.tavily_credits:g}"
         )
 
     @property

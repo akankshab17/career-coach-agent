@@ -78,8 +78,8 @@ def test_failed_briefs_count_too_and_zero_means_no_limit(env, monkeypatch):
     assert post(env, company="B").status_code == 202
 
 
-def test_the_default_is_30_and_a_bad_value_fails_at_startup(tmp_path, monkeypatch):
-    assert api.daily_limit() == 30
+def test_the_default_is_5_and_a_bad_value_fails_at_startup(tmp_path, monkeypatch):
+    assert api.daily_limit() == 5  # Tavily's free plan: 1,000 credits a month
     monkeypatch.setenv("MAX_BRIEFS_PER_DAY", "thirty")
     with pytest.raises(ValueError, match="MAX_BRIEFS_PER_DAY"):
         api.create_app(db_path=str(tmp_path / "jobs.db"), start_worker=False)
@@ -139,7 +139,7 @@ def test_the_image_keeps_secrets_out_and_production_settings_on():
     for entry in (".env", ".cache/", "evals/", "tests/", ".venv/", "*.debug.md"):
         assert entry in ignore, entry
     docker = (ROOT / "Dockerfile").read_text()
-    for setting in ("REQUIRE_ACCESS_CODE=1", "PRIVATE_BRIEFS=1", "MAX_BRIEFS_PER_DAY=30", "USER user", "--uid 1000"):
+    for setting in ("REQUIRE_ACCESS_CODE=1", "PRIVATE_BRIEFS=1", "MAX_BRIEFS_PER_DAY=5", "USER user", "--uid 1000"):
         assert setting in docker, setting
     assert ".env" not in [line.split()[1] for line in docker.splitlines() if line.startswith("COPY")]
     start = (ROOT / "start.sh").read_text()

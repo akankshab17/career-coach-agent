@@ -31,7 +31,7 @@ from location import DEFAULT_LOCATION
 ACCESS_ENV = "APP_ACCESS_CODE"
 ACCESS_HEADER = "X-Access-Code"
 MAX_QUEUED = 20  # more waiting jobs than this and new requests are refused (429)
-DAILY_ENV, DEFAULT_DAILY = "MAX_BRIEFS_PER_DAY", 30  # new briefs per UTC day (0 = no limit)
+DAILY_ENV, DEFAULT_DAILY = "MAX_BRIEFS_PER_DAY", 5  # new briefs per UTC day (0 = no limit); Tavily free plan = 1,000 credits/month
 REQUIRE_ENV, PRIVATE_ENV = "REQUIRE_ACCESS_CODE", "PRIVATE_BRIEFS"
 MIN_ACCESS_CODE = 16  # characters, when a code is required: there is no lockout after wrong guesses
 
@@ -92,6 +92,7 @@ def debug_summary(stats: RunStats) -> dict:
         "sentences_dropped": len(stats.drops),
         "sentences_rewritten": len(stats.rewrites),
         "retry_sections": stats.retry_sections,
+        "tavily_credits": stats.tavily_credits,
         "general_guidance_sections": stats.general_sections,
         "llm": usage["models"],
         "fallback_calls": usage["fallback_calls"],

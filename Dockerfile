@@ -9,7 +9,7 @@ ENV PYTHONUNBUFFERED=1 \
     PORT=7860 \
     REQUIRE_ACCESS_CODE=1 \
     PRIVATE_BRIEFS=1 \
-    MAX_BRIEFS_PER_DAY=30 \
+    MAX_BRIEFS_PER_DAY=5 \
     EXTRACT_CONCURRENCY=2
 
 # Hugging Face runs Spaces as uid 1000; the app writes .cache/ (jobs.db, extraction cache, spend.json) in its home.

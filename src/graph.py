@@ -24,7 +24,7 @@ from brief import (
 )
 from facts import extract_facts, ground, is_official_posting, location_fact, source_text
 from location import DEFAULT_LOCATION
-from search import fetch_full_text, focus_map, gather_research, search_more
+from search import credits_used, fetch_full_text, focus_map, format_credits, gather_research, search_more
 
 MIN_FACTS = 2  # a key section with fewer grounded facts triggers one follow-up search
 CONCURRENCY_ENV = "EXTRACT_CONCURRENCY"
@@ -80,6 +80,13 @@ def _filtered_note(filtered: list[dict]) -> str:
     return f"; filtered {len(filtered)} irrelevant interview results ({', '.join(f'{n} {r}' for r, n in reasons.items())})"
 
 
+def _charged(stats: RunStats, before: float) -> str:
+    """Add the Tavily credits spent since `before` to the brief's total; '; tavily credits: N' for the step's log line."""
+    spent = credits_used() - before
+    stats.tavily_credits += spent
+    return f"; tavily credits: {format_credits(spent)}"
+
+
 def _forum_note(counts: dict | None) -> str:
     """'; forum results: 3 of 10 kept (5 listing pages)': how many forum posts made it past the filters."""
     if not counts:
@@ -95,6 +102,7 @@ def _section_counts(facts: list[dict]) -> Counter:
 
 def search_node(state: BriefState) -> dict:
     stats = state["stats"]
+    before = credits_used()
     research = gather_research(state["company"], state["role"], state["level"], state["jd"], today=state["today"],
                                location=state["location"])
     sources = collect_sources(research, state["company"], state["jd"])
@@ -102,12 +110,13 @@ def search_node(state: BriefState) -> dict:
     stats.filtered += research.get("filtered", [])
     groups = Counter(s["group"] for s in sources.values())
     _log(stats, f"[search] {len(sources)} sources ({', '.join(f'{g} {n}' for g, n in groups.items())})"
-                + _forum_note(research.get("forum_counts")) + _filtered_note(stats.filtered))
+                + _forum_note(research.get("forum_counts")) + _filtered_note(stats.filtered) + _charged(stats, before))
     return {"sources": sources, "extracted": [], "facts": [], "retry_used": False, "location_done": False}
 
 
 def fetch_node(state: BriefState) -> dict:
     stats, sources = state["stats"], state["sources"]
+    before = credits_used()
     fetched, failed = fetch_full_text(sources, focus=focus_map(state["company"], state["role"], state["level"]),
                                       company=state["company"], location=state["location"])
     known = {e["url"] for e in stats.excluded}
@@ -116,6 +125,7 @@ def fetch_node(state: BriefState) -> dict:
     stats.excluded += new
     stats.sources_with_text = sum(1 for s in sources.values() if s.get("full_text"))
     _log(stats, f"[fetch] {fetched} pages fetched, {failed} failed; {stats.sources_with_text}/{len(sources)} sources have full text"
+                + _charged(stats, before)
                 + (f"; excluded {len(new)} posting(s) that require a location outside {state['location']}" if new else ""))
     return {"sources": sources}
 
@@ -272,6 +282,7 @@ def search_more_node(state: BriefState) -> dict:
     stats, sources = state["stats"], state["sources"]
     known = {s["url"] for s in sources.values()}
     added, forum = [], {}
+    before = credits_used()
     for section in state["lacking"]:
         results = search_more(state["company"], state["role"], state["level"], section, known, filtered_out=stats.filtered,
                               location=state["location"], forum_out=forum)
@@ -280,7 +291,8 @@ def search_more_node(state: BriefState) -> dict:
         added.append(f"{section} +{len(new_ids)}")
     stats.retry_sections = list(state["lacking"])
     stats.sources_total = len(sources)
-    _log(stats, f"[search_more] new sources: {', '.join(added)}" + _forum_note(forum) + _filtered_note(stats.filtered))
+    _log(stats, f"[search_more] new sources: {', '.join(added)}" + _forum_note(forum) + _filtered_note(stats.filtered)
+                + _charged(stats, before))
     return {"sources": sources, "retry_used": True}
 
 

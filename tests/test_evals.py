@@ -52,7 +52,7 @@ class FakeTavily:
                             [(ABOUT, "Acme builds payment software"), (REDDIT, "Acme new grad interview experience"),
                              (POSTING, "Software Engineer, New Grad")]]}
 
-    def extract(self, urls):
+    def extract(self, urls, **options):
         self.extract_calls += 1
         return {"results": [{"url": u, "raw_content": PAGES[u]} for u in urls if u in PAGES],
                 "failed_results": [{"url": u} for u in urls if u not in PAGES]}  # Reddit can't be fetched
@@ -254,7 +254,7 @@ def test_recording_and_replay_clients_roundtrip_and_report_misses(capsys):
 
 def test_pages_are_capped_in_fixtures():
     class Big:
-        def extract(self, urls):
+        def extract(self, urls, **options):
             return {"results": [{"url": urls[0], "raw_content": "x" * (harness.PAGE_CAP + 5000)}]}
 
     rec = harness.RecordingClient(Big())

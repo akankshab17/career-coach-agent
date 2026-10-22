@@ -68,12 +68,13 @@ METRICS: dict[str, tuple[int, str]] = {
     "tokens_in": (-1, "perf"),
     "tokens_out": (-1, "perf"),
     "tokens_reasoning": (0, "info"),
+    "tavily_credits": (0, "info"),  # what one brief costs on the Tavily plan (not judged: a fixture miss is free)
 }
 LABELS = {
     "sources": "sources", "full_text": "full-text pages", "facts_company": "facts: company", "facts_interview": "facts: interview",
     "facts_role": "facts: role", "facts_timeline": "facts: timeline", "grounded": "grounded", "rejected": "rejected",
     "dropped": "sentences dropped", "rewrites": "rewrites", "empty_sections": "empty sections", "general_sections": "general guidance", "fixture_misses": "fixture misses",
-    "latency_s": "latency (s)", "tokens_in": "tokens in", "tokens_out": "tokens out", "tokens_reasoning": "of which reasoning",
+    "latency_s": "latency (s)", "tokens_in": "tokens in", "tokens_out": "tokens out", "tokens_reasoning": "of which reasoning", "tavily_credits": "tavily credits",
 }
 WRITER_ONLY_KINDS = {"writer", "output"}  # what can be compared between a facts-only run and a full run
 WRITER_METRICS = tuple(m for m, (_, kind) in METRICS.items() if kind == "writer")  # averaged over --repeat runs
@@ -108,7 +109,11 @@ def load_cases(path: Path | None = None) -> list[Case]:
 
 # ====================================================================== record / replay
 
+KEY_IGNORED_OPTIONS = ("include_usage",)  # asking for the credit count doesn't change the results: old fixtures still match
+
+
 def call_key(query: str, max_results, options: dict) -> str:
+    options = {k: v for k, v in options.items() if k not in KEY_IGNORED_OPTIONS}
     return hashlib.sha1(json.dumps({"q": query, "n": max_results, "o": options}, sort_keys=True, default=str).encode()).hexdigest()[:16]
 
 
@@ -125,8 +130,8 @@ class RecordingClient:
         self.searches[call_key(query, max_results, options)] = {"query": query, "max_results": max_results, "options": options, "response": response}
         return response
 
-    def extract(self, urls):
-        response = self.real.extract(urls=urls)
+    def extract(self, urls, **options):
+        response = self.real.extract(urls=urls, **options)
         for r in response.get("results", []):
             self.pages[r["url"]] = {"raw_content": (r.get("raw_content") or "")[:PAGE_CAP], "failed": False}
         for f in response.get("failed_results", []):
@@ -151,7 +156,7 @@ class ReplayClient:
         print(f"[replay] MISSING search not in fixtures: {query!r} (re-record this case)", file=sys.stderr)
         return {"results": []}
 
-    def extract(self, urls):
+    def extract(self, urls, **options):
         self.calls += 1
         results, failed = [], []
         for url in urls:
@@ -277,6 +282,7 @@ def case_metrics(stats: RunStats, text: str, latency: float, usage: dict, misses
         "tokens_in": usage["input"],
         "tokens_out": usage["output"],
         "tokens_reasoning": usage["reasoning"],
+        "tavily_credits": round(stats.tavily_credits, 1),
         # context for the comparison (not metrics):
         "llm": usage.get("models", {}),  # {task: ["provider/model", ...]} that actually served this case
         "fallback_calls": usage.get("fallback_calls", 0),

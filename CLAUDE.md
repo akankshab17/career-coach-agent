@@ -13,7 +13,7 @@ The user is learning: build in small steps, explain design decisions, stop after
   `site:`, listing pages without `/comments/` or a post id dropped; plus one general query), the posting). **fetch**: full page text via Tavily extract. **extract**: one LLM call per source (parallel, `EXTRACT_CONCURRENCY` default 4), told the page's purpose
   (company/role/interview), returns facts as JSON `{fact, exact_quote, section, stage, level, about_company}`. **ground**: code keeps a fact only if its quote is in the page.
   **coverage**: fewer than 2 grounded interview or role facts triggers ONE follow-up search. **write**: one LLM call, grounded
-  facts only. **finalize**: code-only checks, citations, rendering. Each step prints a one-line count to stderr.
+  facts only. **finalize**: code-only checks, citations, rendering. Each step prints a one-line count to stderr. Tavily credits: each search/fetch/search_more line ends with `; tavily credits: N` (reported via `include_usage`, else estimated: search 1, extract 1 per 5 pages); `[pipeline]` has the brief total. The eval harness ignores `include_usage` in fixture keys.
 
 ## Files
 - `src/main.py` CLI (`--level --location --jd -o --no-cache --debug-file`); writes the brief and a `.debug.md` run report.
@@ -35,7 +35,7 @@ The user is learning: build in small steps, explain design decisions, stop after
 - Deploy (Hugging Face Spaces, Docker SDK): `Dockerfile` + `start.sh` (API on 127.0.0.1:8000, Streamlit on $PORT=7860, the only
   exposed port), `.dockerignore` (no .env/.cache/evals/tests in the image), README YAML header = Space config. Image env:
   `REQUIRE_ACCESS_CODE=1` (serve() refuses to start without an APP_ACCESS_CODE of 16+ chars), `PRIVATE_BRIEFS=1` (GET /briefs
-  403; the app lists only this browser session's briefs), `MAX_BRIEFS_PER_DAY=30` (new briefs per UTC day, all users; reuse
+  403; the app lists only this browser session's briefs), `MAX_BRIEFS_PER_DAY=5` (Tavily free plan: 1,000 credits/month; new briefs per UTC day, all users; reuse
   is free; 429 with the reset time). Free Space disk is ephemeral: jobs.db, extraction cache and spend.json reset on
   restart; the user's prepaid OpenAI balance (auto-reload off) is the real fallback cap. `requirements.txt` = pinned
   runtime deps; `requirements-dev.txt` adds pytest.

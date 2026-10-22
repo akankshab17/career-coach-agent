@@ -1,9 +1,11 @@
 """Web research via the Tavily search API (no scraping)."""
 from __future__ import annotations
 
+import math
 import os
 import re
 import sys
+import threading
 from collections import Counter
 from datetime import date, datetime, timedelta
 from email.utils import parsedate_to_datetime
@@ -126,11 +128,39 @@ def _parse_date(raw: str | None) -> str | None:
         return None
 
 
+# ---------- Tavily credits ----------
+# The free plan is 1,000 credits a month. Tavily reports what each call cost (include_usage); when a response has no usage
+# (an old recorded fixture), the cost is estimated from the price list: a basic search is 1 credit, an advanced one 2;
+# extract costs 1 credit per 5 pages it returned (failed pages are free).
+SEARCH_CREDITS = {"basic": 1, "advanced": 2}
+EXTRACT_PAGES_PER_CREDIT = 5
+_credits = {"used": 0.0}
+_credits_lock = threading.Lock()
+
+
+def credits_used() -> float:
+    """Credits spent since the process started. Callers take the difference around a step."""
+    with _credits_lock:
+        return _credits["used"]
+
+
+def _charge(response: dict, estimate: float) -> None:
+    usage = response.get("usage") if isinstance(response, dict) else None
+    reported = usage.get("credits") if isinstance(usage, dict) else None
+    with _credits_lock:
+        _credits["used"] += float(reported) if isinstance(reported, (int, float)) else estimate
+
+
+def format_credits(n: float) -> str:
+    return f"{n:g}"
+
+
 def search(query: str, client: TavilyClient | None = None, max_results: int = MAX_RESULTS, **options) -> list[dict]:
-    """Run one Tavily query; return [{title, url, content, published_date}, ...]."""
+    """Run one Tavily query; return [{title, url, content, published_date}, ...]. Its credit cost is counted."""
     client = client or TavilyClient(api_key=os.environ["TAVILY_API_KEY"])
     options["exclude_domains"] = sorted(set(options.get("exclude_domains") or []) | set(BLOCKED_DOMAINS))
-    response = client.search(query=query, max_results=max_results, **options)
+    response = client.search(query=query, max_results=max_results, include_usage=True, **options)
+    _charge(response, SEARCH_CREDITS.get(options.get("search_depth") or "basic", 1))
     return [
         {
             "title": r.get("title", ""),
@@ -431,10 +461,11 @@ def extract(urls: list[str], client: TavilyClient | None = None) -> dict[str, st
     for start in range(0, len(urls), EXTRACT_BATCH):
         batch = urls[start:start + EXTRACT_BATCH]
         try:
-            response = client.extract(urls=batch)
+            response = client.extract(urls=batch, include_usage=True)
         except Exception as exc:
             print(f"[search] extract failed ({type(exc).__name__}: {exc}); {len(batch)} pages skipped", file=sys.stderr)
             continue
+        _charge(response, math.ceil(len(response.get("results", [])) / EXTRACT_PAGES_PER_CREDIT))
         for failed in response.get("failed_results", []):
             print(f"[search] could not extract {failed.get('url')}; skipped", file=sys.stderr)
         for r in response.get("results", []):

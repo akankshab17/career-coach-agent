@@ -111,7 +111,8 @@ small table. The `Dockerfile` runs both processes in one container (`start.sh`):
 from inside the container, and Streamlit on port 7860, the only port the Space exposes (over HTTPS). Production settings
 baked into the image: `REQUIRE_ACCESS_CODE=1` (the API refuses to start without an `APP_ACCESS_CODE` of 16+ characters),
 `PRIVATE_BRIEFS=1` (no shared list of briefs; each browser session sees only its own, since JDs can hold student details),
-`MAX_BRIEFS_PER_DAY=30` (new briefs per UTC day for everyone together; reusing a recent brief is free; `0` = no limit) and
+`MAX_BRIEFS_PER_DAY=5` (new briefs per UTC day for everyone together; reusing a recent brief is free; `0` = no limit; sized
+for Tavily's free plan of 1,000 credits a month, see "Tavily credits" below) and
 `EXTRACT_CONCURRENCY=2`. Any of them can be overridden with a Space variable. Keys exist only as Space secrets.
 
 **What the free Space does not keep.** The disk is wiped whenever the Space restarts, sleeps (after 48 hours without
@@ -119,6 +120,15 @@ visitors) or is rebuilt: the jobs database (briefs, the 7-day reuse, today's cou
 cache and `.cache/spend.json`. Because `spend.json` starts at $0 after every restart, `OPENAI_BUDGET_USD` cannot cap OpenAI
 spending across restarts. **The real cap is a prepaid OpenAI balance with auto-reload turned off**: when it runs out,
 fallback calls fail and the brief fails with a clear message. Keep it that way while the fallback is on.
+
+**Tavily credits.** Every step logs what it cost: `[search] ...; tavily credits: 9`, `[fetch] ...; tavily credits: 2`,
+`[search_more] ...; tavily credits: 4`, and the `[pipeline]` line has the brief's total (`tavily_credits=11`); the web app's
+run details and the eval table show it too. The numbers are what Tavily reports for each call; for an old recorded fixture
+without usage data they are estimated from the price list (basic search 1 credit, extract 1 credit per 5 pages). Measured on
+the five eval cases: about 9-12 credits for search + fetch, plus roughly 3-6 when the follow-up search runs. So the free plan's
+1,000 credits a month cover about 70-100 briefs (2-3 a day). `MAX_BRIEFS_PER_DAY=5`, fully used every day, would need about
+1,650-2,500 credits a month: it stops a single busy day from draining the plan, not the whole month. Set it to 2 or 3 to
+stay inside the free plan even at full use.
 
 ### 1. Test the image on your machine
 ```
