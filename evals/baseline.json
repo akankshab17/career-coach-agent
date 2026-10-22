@@ -1,82 +1,76 @@
 {
  "cases": {
   "google-intern": {
-   "sources": 20,
-   "full_text": 9,
-   "facts_company": 28,
-   "facts_interview": 26,
-   "facts_role": 16,
-   "facts_timeline": 7,
-   "grounded": 77,
-   "rejected": 2,
-   "dropped": 3,
-   "rewrites": 4,
+   "sources": 30,
+   "full_text": 14,
+   "facts_company": 35,
+   "facts_interview": 29,
+   "facts_role": 46,
+   "facts_timeline": 16,
+   "grounded": 126,
+   "rejected": 9,
+   "dropped": 1,
+   "rewrites": 7,
    "empty_sections": 0,
    "general_sections": 0,
-   "fixture_misses": 1,
-   "latency_s": 102.7,
-   "tokens_in": 18592,
-   "tokens_out": 7517,
-   "tokens_reasoning": 2282,
-   "cache_hits": 2,
-   "cache_misses": 11,
+   "fixture_misses": 0,
+   "latency_s": 8.6,
+   "tokens_in": 2964,
+   "tokens_out": 3763,
+   "tokens_reasoning": 2715,
+   "cache_hits": 22,
+   "cache_misses": 0,
    "llm": {
-    "extract": [
-     "groq/openai/gpt-oss-20b"
-    ],
     "write": [
      "groq/openai/gpt-oss-120b"
     ]
    }
   },
   "cummins-swe-new-grad": {
-   "sources": 12,
-   "full_text": 5,
-   "facts_company": 29,
-   "facts_interview": 0,
-   "facts_role": 8,
+   "sources": 17,
+   "full_text": 7,
+   "facts_company": 37,
+   "facts_interview": 2,
+   "facts_role": 12,
    "facts_timeline": 0,
-   "grounded": 37,
-   "rejected": 11,
+   "grounded": 51,
+   "rejected": 5,
    "dropped": 1,
    "rewrites": 0,
-   "empty_sections": 1,
+   "empty_sections": 0,
    "general_sections": 0,
-   "fixture_misses": 1,
-   "latency_s": 65.5,
-   "tokens_in": 9100,
-   "tokens_out": 4133,
-   "tokens_reasoning": 761,
-   "cache_hits": 0,
-   "cache_misses": 5,
+   "fixture_misses": 0,
+   "latency_s": 32.4,
+   "tokens_in": 2308,
+   "tokens_out": 1802,
+   "tokens_reasoning": 1065,
+   "cache_hits": 10,
+   "cache_misses": 0,
    "llm": {
-    "extract": [
-     "groq/openai/gpt-oss-20b"
-    ],
     "write": [
      "groq/openai/gpt-oss-120b"
     ]
    }
   },
   "perplexity-ai-engineer-new-grad": {
-   "sources": 15,
-   "full_text": 8,
-   "facts_company": 25,
-   "facts_interview": 20,
-   "facts_role": 2,
-   "facts_timeline": 4,
-   "grounded": 51,
+   "sources": 17,
+   "full_text": 10,
+   "facts_company": 32,
+   "facts_interview": 17,
+   "facts_role": 22,
+   "facts_timeline": 7,
+   "grounded": 78,
    "rejected": 7,
    "dropped": 1,
    "rewrites": 0,
    "empty_sections": 0,
    "general_sections": 0,
-   "fixture_misses": 1,
-   "latency_s": 136.0,
-   "tokens_in": 17668,
-   "tokens_out": 8121,
-   "tokens_reasoning": 3164,
-   "cache_hits": 0,
+   "fixture_misses": 0,
+   "latency_s": 108.0,
+   "tokens_in": 18977,
+   "tokens_out": 8337,
+   "tokens_reasoning": 2785,
+   "cache_hits": 3,
    "cache_misses": 8,
    "llm": {
     "extract": [
@@ -88,25 +82,54 @@
    }
   },
   "salesforce-apm-new-grad": {
-   "sources": 15,
+   "sources": 21,
    "full_text": 5,
-   "facts_company": 19,
-   "facts_interview": 6,
-   "facts_role": 26,
+   "facts_company": 11,
+   "facts_interview": 10,
+   "facts_role": 8,
    "facts_timeline": 1,
-   "grounded": 52,
+   "grounded": 30,
    "rejected": 3,
    "dropped": 1,
-   "rewrites": 3,
+   "rewrites": 0,
    "empty_sections": 0,
    "general_sections": 0,
    "fixture_misses": 0,
-   "latency_s": 52.6,
-   "tokens_in": 9162,
-   "tokens_out": 6004,
-   "tokens_reasoning": 3063,
-   "cache_hits": 3,
-   "cache_misses": 4,
+   "latency_s": 101.4,
+   "tokens_in": 15726,
+   "tokens_out": 6034,
+   "tokens_reasoning": 3130,
+   "cache_hits": 0,
+   "cache_misses": 11,
+   "llm": {
+    "extract": [
+     "groq/openai/gpt-oss-20b"
+    ],
+    "write": [
+     "groq/openai/gpt-oss-120b"
+    ]
+   }
+  },
+  "amazon-sde-new-grad": {
+   "sources": 27,
+   "full_text": 15,
+   "facts_company": 19,
+   "facts_interview": 53,
+   "facts_role": 60,
+   "facts_timeline": 4,
+   "grounded": 136,
+   "rejected": 25,
+   "dropped": 0,
+   "rewrites": 1,
+   "empty_sections": 0,
+   "general_sections": 0,
+   "fixture_misses": 0,
+   "latency_s": 41.8,
+   "tokens_in": 7454,
+   "tokens_out": 3861,
+   "tokens_reasoning": 1757,
+   "cache_hits": 18,
+   "cache_misses": 2,
    "llm": {
     "extract": [
      "groq/openai/gpt-oss-20b"
@@ -117,10 +140,10 @@
    }
   }
  },
- "pinned": "20261021-152702",
+ "pinned": "20261022-142243",
  "mode": "replay",
  "git": {
-  "commit": "24fb6f5",
+  "commit": "636212a",
   "dirty": false
  },
  "models": {
