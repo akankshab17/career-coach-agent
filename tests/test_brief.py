@@ -811,3 +811,16 @@ def test_forum_reports_keep_three_interview_slots_when_official_facts_would_fill
     assert sum(f["is_experience"] for f in picked) == 3 and len([f for f in picked if f["section"] == "interview"]) == 10
     picked = brief.select_for_writing(official + reports[:1], limit=10, level="new-grad")
     assert sum(f["is_experience"] for f in picked) == 1  # fewer reports than the reserve: all of them
+
+
+def test_a_label_written_after_the_full_stop_keeps_its_sentence_cited():
+    """Amazon: '... ecosystem. (reported Dec 2025) [F12]' was split at the full stop and the sentence dropped as uncited."""
+    body = ("## 1. Company overview + recent news\n- Stripe builds payments infrastructure. (reported Feb 2026) [F1]\n"
+            "- Stripe was valued highly [F4]. (reported Feb 2026)\n"
+            "## 4. How to prepare\n1. Practice string parsing. (based on reported questions) [F3]\n")
+    out, stats = check(body)
+    assert not stats.drops
+    assert "- Stripe builds payments infrastructure (reported Feb 2026) [F1]." in out
+    assert "- Stripe was valued highly (reported Feb 2026) [F4]." in out
+    assert "1. Practice string parsing (based on reported questions) [F3]." in out
+    assert brief.normalize_citations("Mid-sentence (aside) text [F1]. Next.", 1) == "Mid-sentence (aside) text [F1]. Next."

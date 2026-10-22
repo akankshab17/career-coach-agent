@@ -186,7 +186,21 @@ search -> fetch -> extract -> ground -> coverage --enough--> write -> finalize
 5. **coverage**: if interview or role has fewer than 2 grounded facts, search once more for that section.
    (TL;DR is built from interview + role facts.)
 6. **write**: the LLM gets at most 30 grounded facts (role/posting and interview first, spread across sources; at
-   least 5 company facts are kept so section 1 isn't empty), and writes the brief citing them as `[F3]`.
+   least 5 company facts are kept so section 1 isn't empty), and writes the brief citing them as `[F3]`. Which facts
+   (`select_for_writing` + `src/ranking.py`, all code):
+   - **Specific beats generic.** Named problems and topics ("a variation of LRU Cache and a Top K problem", "Course Schedule
+     II"), spelled-out questions, numbers and concrete requirements score up; marketing ("self-motivated", "powerful
+     technologies", "talent community") and "the page includes..." score down. Interview facts go specific band first.
+   - **Role facts: the official posting (or your JD) first**, then the company's own site, guides, aggregators; most specific
+     first within each; marketing last whatever its source.
+   - **Near-duplicates merge**: the same claim from several sources (>= 60% word overlap, same section, same numbers) becomes
+     one fact that cites every source.
+   - **Company news for engineering roles**: product/tech news before stock and earnings news.
+   - Grounding drops **personal dates** from forum/blog posts ("took the OA on January 6, 2025": `personal-date`); durations
+     ("offer after six business days") stay. The **posting location** comes only from an official posting or your JD, never an
+     aggregator; Indeed search pages (`/q-...-jobs.html`) are job lists, not postings.
+   - A date label the writer puts after the full stop ("... ecosystem. (reported Dec 2025) [F12]") is moved back inside the
+     sentence, which was otherwise dropped as uncited.
    Citation variants (`【F3】`, `[F1, F2]`, `[F1-F3]`, `(F3)`, a bare `F3.`) are normalized before checking. Section 2 is grouped by
    interview stage; TL;DR has one bullet each for format, key topics and a standout insight. Company facts are capped
    (10 total, 3 per article) and related facts are merged so "the acquisition" always names what it is.

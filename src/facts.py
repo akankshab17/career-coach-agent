@@ -32,6 +32,11 @@ TIME_SENSITIVE_RE = re.compile(
     re.I,
 )
 NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)*")
+_MONTH = (r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|"
+          r"oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)")
+# A specific day: "January 6", "6th of January", "1/24/2025". Durations ("six business days") and months alone don't count.
+CALENDAR_DATE_RE = re.compile(rf"\b{_MONTH}\.?\s+\d{{1,2}}(?:st|nd|rd|th)?\b|\b\d{{1,2}}(?:st|nd|rd|th)?\s+(?:of\s+)?{_MONTH}\b|"
+                              r"\b\d{1,2}/\d{1,2}(?:/\d{2,4})?\b", re.I)
 
 # Words that mark a claim as unconfirmed. A source whose *title* says "may acquire" must not become "acquired".
 HEDGED_TITLE_RE = re.compile(
@@ -52,6 +57,7 @@ REJECT_REASONS = {
     "undated-time-sensitive": "time-sensitive fact from an undated source",
     "duplicate": "same fact already grounded",
     "faq-or-navigation": "the quote is a question from a FAQ or menu on the company's own site, not a fact",
+    "personal-date": "a calendar date from one candidate's own story (forum/blog), not the company's timeline",
 }
 
 EXTRACT_SYSTEM_PROMPT = f"""You extract facts for a student's interview-prep brief from ONE web page.
@@ -249,6 +255,8 @@ def ground(candidates: list[dict], sources: dict, already: list[dict] | None = N
             reject(c, "quote-not-found")
         elif src.get("kind") == "company" and quote.strip().endswith("?"):  # "Can I apply to multiple roles?"
             reject(c, "faq-or-navigation")
+        elif src.get("kind") in EXPERIENCE_KINDS and section in ("timeline", "interview") and CALENDAR_DATE_RE.search(fact):
+            reject(c, "personal-date")  # "the candidate took the OA on January 6, 2025": one person's diary, not the process
         elif c.get("about_company") is False:
             reject(c, "wrong-subject")
         elif (brand := about_publisher_not_company(fact, src, company)):
@@ -288,12 +296,22 @@ def ground(candidates: list[dict], sources: dict, already: list[dict] | None = N
 
 # ---------- the posting's location (code only) ----------
 
+def is_official_posting(source: dict) -> bool:
+    """The company's own posting (its site or its applicant-tracking system) or the JD the user pasted."""
+    return source.get("type") == "official-posting" or source.get("kind") == "jd"
+
+
 def location_fact(sid: str, source: dict, location: str | None) -> dict | None:
     """A grounded role fact saying where the posting's job is, taken verbatim from the page (or None).
 
     Built directly from the text, so it is grounded by construction. `pinned` keeps it out of the writer's fact cap.
+    Only from an official posting or the JD: an aggregator's page (an Indeed search for "Amazon entry level") gave
+    "Posting location: Boulder, CO" for a job nobody had chosen.
     """
     from search import posting_location
+
+    if not is_official_posting(source):
+        return None
 
     found = posting_location(source, location)
     if not found or normalize(found["quote"]) not in normalize(source["full_text"]):

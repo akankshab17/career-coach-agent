@@ -611,7 +611,8 @@ def looks_like_job_list(url: str, title: str = "", text: str | None = None) -> b
     host = _host(url)
     if _host_in(host, JOB_LIST_HOSTS):
         return True
-    if JOB_LIST_TITLE_RE.search(title) or re.search(r"[-/]jobs-(?:in|near|at)[-/]|/jobs/search|/job-search|/jobs/?$", url, re.I):
+    if JOB_LIST_TITLE_RE.search(title) or re.search(r"[-/]jobs-(?:in|near|at)[-/]|/jobs/search|/job-search|/jobs/?$|/q-[^/]*-jobs\.html",
+                                                     url, re.I):  # Indeed search results: /q-amazon-entry-level-software-engineer-jobs.html
         return True
     return text is not None and len(JOB_LIST_MARKER_RE.findall(text)) >= JOB_LIST_MARKERS
 

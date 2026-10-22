@@ -112,16 +112,22 @@ def test_posting_queries_include_the_location(monkeypatch):
 # ---- the location fact ----
 
 def test_location_fact_is_grounded_by_construction_and_pinned():
-    src = {"url": "https://acme.com/jobs/1", "full_text": MUSE_WUHAN, "published_date": None}
+    src = {"url": "https://acme.com/jobs/1", "full_text": MUSE_WUHAN, "published_date": None, "type": "official-posting"}
     fact = facts.location_fact("S4", src, "United States")
     assert fact["pinned"] and fact["section"] == "role" and fact["source_id"] == "S4"
     assert fact["fact"].startswith("Posting location: ") and fact["fact"].endswith("(outside United States).")
     assert fact["exact_quote"] in MUSE_WUHAN
 
-    us = facts.location_fact("S1", {"url": "u", "full_text": STRIPE_US}, "United States")
+    official = {"type": "official-posting"}
+    us = facts.location_fact("S1", {"url": "u", "full_text": STRIPE_US, **official}, "United States")
     assert us["fact"] == "Posting location: New York, Seattle, South San Francisco."  # no suffix when it's in the location
-    assert facts.location_fact("S1", {"url": "u", "full_text": "nothing here " * 50}, "United States") is None
-    assert facts.location_fact("S1", {"url": "u", "content": "snippet only"}, "United States") is None
+    assert facts.location_fact("S1", {"url": "u", "full_text": "nothing here " * 50, **official}, "United States") is None
+    assert facts.location_fact("S1", {"url": "u", "content": "snippet only", **official}, "United States") is None
+    assert facts.location_fact("S1", {"url": "jd://user-provided", "full_text": STRIPE_US, "kind": "jd"}, "United States")
+    # never from an aggregator (or any page that isn't the company's own posting)
+    indeed = {"url": "https://www.indeed.com/q-amazon-entry-level-software-engineer-jobs.html", "full_text": STRIPE_US,
+              "type": "job-aggregator"}
+    assert facts.location_fact("S27", indeed, "United States") is None
 
 
 def test_source_kind_blogs():

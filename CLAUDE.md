@@ -23,6 +23,7 @@ The user is learning: build in small steps, explain design decisions, stop after
 - `src/location.py` text heuristics: which country a posting is in, the posting's location line.
 - `src/facts.py` extraction prompt (`PROMPT_VERSION`), on-disk cache, `ground()`, hedges, wrong-subject check, location fact.
 - `src/guidance.py` general prep/questions per role family, used only when a brief has no interview or role facts.
+- `src/ranking.py` fact usefulness for the writer: specificity, near-duplicate merging, product/tech news first.
 - `src/brief.py` source ids/types, `RunStats` + debug report, writer prompt, `select_for_writing`, `check_body` (all finalize rules),
   citation normalizer, sentence splitter, section enforcement, rendering.
 - `src/llm.py` the ONLY file that knows providers (groq default, openai): model routing, retries, rate-limit classification, usage log,
@@ -80,7 +81,11 @@ The user is learning: build in small steps, explain design decisions, stop after
   snippet is used (grounded against the snippet, tagged `[snippet-grounded]`).
 - **Writer gets <= 30 facts**: interview + role first (spread across sources; the candidate's level first), >= 5 company facts, <= 4
   timeline facts, pinned location fact, and >= 3 interview slots for forum/blog reports when any exist (official pages rank
-  first and once took every slot).
+  first and once took every slot). Ranking (`src/ranking.py`): specificity score (named problems/topics/questions, numbers,
+  requirements up; marketing/meta down); role facts by source tier (official-posting/JD, company-site, guide, aggregator...);
+  near-duplicates merged into one fact with `also_sources` (rendered as several links; different numbers never merge);
+  product/tech company news first for engineering families. Personal dates from forum/blog are rejected (`personal-date`);
+  the location fact only comes from `is_official_posting` sources.
 - **Levels on role facts too** (extract-v6): an intern program's duties or a manager posting's requirements are other-level role
   facts; a posting's title/URL level (`search.explicit_level`) overrides the extractor. **Dedupe by `canonical_url`** (language
   segments ignored, English kept). **FAQ/nav quotes** (a question on the company's own site) are rejected (`faq-or-navigation`).

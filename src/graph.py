@@ -22,7 +22,7 @@ from brief import (
     KEY_SECTIONS, BriefResult, RunStats, add_sources, build_writer_prompt, collect_sources, finalize_brief,
     select_for_writing,
 )
-from facts import extract_facts, ground, location_fact, source_text
+from facts import extract_facts, ground, is_official_posting, location_fact, source_text
 from location import DEFAULT_LOCATION
 from search import fetch_full_text, focus_map, gather_research, search_more
 
@@ -227,8 +227,8 @@ def ground_node(state: BriefState) -> dict:
     grounded, rejected = ground(state["candidates"], state["sources"], already=state["facts"], company=state["company"])
     location_done = state["location_done"]
     if not location_done:  # the primary posting's location, read straight from its page (code only)
-        posting = next((sid for g in ("posting", "role") for sid, s in state["sources"].items()
-                        if s.get("group") == g and s.get("full_text")), None)
+        posting = next((sid for g in ("jd", "posting", "role", "careers", "company", "interview") for sid, s in state["sources"].items()
+                        if s.get("group") == g and s.get("full_text") and is_official_posting(s)), None)
         if posting:
             location_done = True
             loc = location_fact(posting, state["sources"][posting], state["location"])
@@ -285,7 +285,7 @@ def search_more_node(state: BriefState) -> dict:
 
 
 def write_node(state: BriefState) -> dict:
-    selected = select_for_writing(state["facts"], level=state["level"])
+    selected = select_for_writing(state["facts"], level=state["level"], role=state["role"], company=state["company"])
     system, user = build_writer_prompt(state["company"], state["role"], state["level"], selected, state["sources"], state["today"])
     cut_before = llm.truncation_count()
     body = llm.generate(system, user, task="write")

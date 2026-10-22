@@ -9,7 +9,8 @@ from typing import Callable
 
 import guidance
 from facts import HEDGE_WORD_RE, LOWERABLE_STARTERS, NUMBER_RE, REJECT_REASONS, add_hedge
-from search import TYPE_LABEL, canonical_url, is_blocked, is_careers_page, prefers, source_kind, source_type
+from ranking import merge_near_duplicates, news_rank, specificity
+from search import TYPE_LABEL, canonical_url, is_blocked, is_careers_page, prefers, role_family, source_kind, source_type
 
 JD_URL = "jd://user-provided"
 LEVEL_LABEL = {"intern": "intern", "new-grad": "new grad", "experienced": "experienced"}
@@ -291,28 +292,73 @@ def _ranked(facts: list[dict], per_source: int | None = None) -> list[dict]:
     return _round_robin_by_source(official, per_source) + _round_robin_by_source(others, per_source)
 
 
-def select_for_writing(facts: list[dict], limit: int = MAX_WRITER_FACTS, level: str | None = None) -> list[dict]:
-    """At most `limit` facts for the writer. Posting/role and interview facts come first; company facts get
-    what is left, but never fewer than COMPANY_RESERVE (so section 1 isn't empty). Interview facts from the
-    candidate's own level (or of unknown level) are preferred over other levels'. Each group is interleaved
-    across its sources. Pinned facts (the posting's location) are always kept. Returned in original order,
-    so fact ids are stable."""
-    pinned = [f for f in facts if f.get("pinned")]
-    pool = [f for f in facts if not f.get("pinned")]
+SPECIFIC = 3  # specificity at or above this: a named problem, topic, question or requirement
+ROLE_TIER = {"official-posting": 0, "company-site": 1, "third-party-guide": 2, "job-aggregator": 3, "forum/blog": 4, "news": 5}
+
+
+def role_tier(f: dict) -> int:
+    """0 = the official posting / JD, 1 = the company's own site, 2+ = everything else (no type known: by `official`)."""
+    t = f.get("source_type")
+    return ROLE_TIER[t] if t in ROLE_TIER else (1 if f.get("official") else 2)
+
+
+def _by_specificity(facts: list[dict], score) -> list[dict]:
+    """Bands (specific, neutral, generic), each interleaved across sources with every source's facts best-first:
+    a named LeetCode problem beats "the interview assesses problem solving", wherever it sits on its page."""
+    bands = ([f for f in facts if score(f) >= SPECIFIC], [f for f in facts if 0 <= score(f) < SPECIFIC],
+             [f for f in facts if score(f) < 0])
+    return [f for band in bands for f in _ranked(sorted(band, key=lambda f: -score(f)))]  # sorted() is stable
+
+
+def _role_order(facts: list[dict], score) -> list[dict]:
+    """The official posting (or the JD) first, then the company's site, guides, aggregators...; within a tier the most
+    specific first. Marketing lines (negative score) go last whatever their source."""
+    useful = [f for f in facts if score(f) >= 0]
+    out = []
+    for tier in sorted({role_tier(f) for f in useful}):
+        in_tier = [f for f in useful if role_tier(f) == tier]
+        out += _round_robin_by_source(sorted(in_tier, key=lambda f: -score(f)))
+    return out + sorted((f for f in facts if score(f) < 0), key=lambda f: -score(f))
+
+
+def select_for_writing(facts: list[dict], limit: int = MAX_WRITER_FACTS, level: str | None = None, role: str | None = None,
+                       company: str = "") -> list[dict]:
+    """At most `limit` facts for the writer, the most useful ones:
+    - near-duplicates (the same claim from several sources) become one fact citing all of them;
+    - interview facts: the candidate's level first, then by specificity (named problems, topics, questions, numbers beat
+      generic statements), at least FORUM_RESERVE candidate reports when there are any;
+    - role facts: the candidate's level first, then the official posting / JD, then the company's site, ..., most specific
+      first, marketing last;
+    - company facts: never fewer than COMPANY_RESERVE; for engineering roles product/tech news before market news.
+    Pinned facts (the posting's location) are always kept. Returned in first-appearance order, so fact ids are stable."""
+    family = role_family(role) if role else None
+    scores: dict[int, int] = {}
+
+    def score(f: dict) -> int:
+        if id(f) not in scores:
+            scores[id(f)] = specificity(f, company)
+        return scores[id(f)]
+
+    merged = merge_near_duplicates(facts, better=lambda f: (role_tier(f), -score(f)), company=company)
+    pinned = [f for f in merged if f.get("pinned")]
+    pool = [f for f in merged if not f.get("pinned")]
     timeline = _ranked([f for f in pool if f["section"] == "timeline"])[:TIMELINE_MAX]
     limit -= len(pinned) + len(timeline)
-    company = _ranked([f for f in pool if f["section"] == "company"], COMPANY_FACTS_PER_SOURCE)
-    def level_first(section: str) -> list[dict]:  # the candidate's level (or unknown) first; other levels only to fill
+    company_facts = sorted((f for f in pool if f["section"] == "company"), key=lambda f: news_rank(f, family))
+    company_facts = _ranked(company_facts, COMPANY_FACTS_PER_SOURCE)
+    company_facts = sorted(company_facts, key=lambda f: news_rank(f, family))  # interleaved, but product/tech news first
+
+    def level_first(section: str, order) -> list[dict]:  # the candidate's level (or unknown) first; other levels only to fill
         facts_ = [f for f in pool if f["section"] == section]
         fits = [f for f in facts_ if not level_mismatch(f, level)]
-        return _ranked(fits) + _ranked([f for f in facts_ if f not in fits])
+        return order(fits, score) + order([f for f in facts_ if f not in fits], score)
 
-    interview, role = level_first("interview"), level_first("role")
+    interview, role_facts = level_first("interview", _by_specificity), level_first("role", _role_order)
 
-    reserve = min(COMPANY_RESERVE, len(company))
+    reserve = min(COMPANY_RESERVE, len(company_facts))
     room = limit - reserve
     interview_quota = min(len(interview), -(-room * 3 // 5))  # ~60% of the non-company room
-    role_quota = min(len(role), room - interview_quota)
+    role_quota = min(len(role_facts), room - interview_quota)
     interview_quota = min(len(interview), room - role_quota)  # unused role room flows to interview
     picked = interview[:interview_quota]
     reports = [f for f in interview if f.get("is_experience")][:min(FORUM_RESERVE, interview_quota)]
@@ -320,11 +366,11 @@ def select_for_writing(facts: list[dict], limit: int = MAX_WRITER_FACTS, level: 
         # official pages rank first and can fill every interview slot; candidates' own reports keep FORUM_RESERVE of them
         rest = [f for f in interview if f not in reports]
         picked = reports + rest[:interview_quota - len(reports)]
-    chosen = picked + role[:role_quota]
+    chosen = picked + role_facts[:role_quota]
     company_room = min(COMPANY_FACTS_FOR_WRITER, limit - len(chosen))
-    chosen += company[:max(company_room, reserve)]
+    chosen += company_facts[:max(company_room, reserve)]
     keep = {id(f) for f in chosen} | {id(f) for f in pinned} | {id(f) for f in timeline}
-    return [f for f in facts if id(f) in keep]
+    return [f for f in merged if id(f) in keep]
 
 
 def fact_ids(facts: list[dict]) -> dict[str, dict]:
@@ -343,7 +389,7 @@ def level_label(f: dict) -> str:
 
 
 def _fact_line(fid: str, f: dict, level: str | None = None) -> str:
-    tags = [f"source {f['source_id']}" + (f" {f['source_type']}" if f.get("source_type") else "")]
+    tags = [f"source {'+'.join([f['source_id'], *f.get('also_sources', [])])}" + (f" {f['source_type']}" if f.get("source_type") else "")]
     if f.get("stage"):
         tags.append(f"stage {f['stage']}")
     if f.get("level") in LEVEL_PROCESS:
@@ -447,6 +493,10 @@ def normalize_citations(body: str, n_facts: int) -> str:
     """Rewrite every citation variant to canonical [F1][F2]. Bare ids ("... rounds F3.") are only
     converted when they are real fact ids, at the end of a sentence."""
     body = CITE_GROUP_RE.sub(lambda m: "".join(f"[F{n}]" for n in _expand(m.group(1))), body)
+    # "... ecosystem. (reported Dec 2025) [F12]" -> "... ecosystem (reported Dec 2025) [F12]." A label after the full stop
+    # left the sentence without its citation, and it was dropped as uncited.
+    body = LABEL_AFTER_STOP_RE.sub(lambda m: f" {m.group(2)} {m.group(3).strip()}{m.group(1)}", body)
+    body = LABEL_AFTER_CITES_RE.sub(lambda m: f" {m.group(3)} {m.group(1).strip()}{m.group(2)}", body)
 
     def bare(m: re.Match) -> str:
         nums = [int(n) for n in re.findall(r"\d+", m.group(0))]
@@ -456,6 +506,10 @@ def normalize_citations(body: str, n_facts: int) -> str:
 
 
 CITE_RE = re.compile(r"\[(F\d+)\]")
+# A short parenthetical the writer put after the sentence's end mark: "... ecosystem. (reported Dec 2025) [F12]",
+# "... day-to-day work? (based on team-screen AI questions) [F27]", "... engines [F3]. (reported Nov 2025)".
+LABEL_AFTER_STOP_RE = re.compile(r"([.!?])[ \t]*(\([^()\n]{3,80}\))[ \t]*((?:\[F\d+\][ \t]*)+)")
+LABEL_AFTER_CITES_RE = re.compile(r"((?:[ \t]*\[F\d+\])+)[ \t]*([.!?])[ \t]*(\([^()\n]{3,80}\))[ \t]*(?=\n|$)")
 BOUNDARY_RE = re.compile(r"([.!?])((?:\s*\[F\d+\])*)(?=\s|$)")  # a sentence end, plus its trailing citations
 # Words whose trailing "." does not end a sentence. Dotted forms (B.Tech, M.S., e.g., U.S., Ph.D.) are matched by pattern.
 ABBREVIATIONS = {"inc", "corp", "co", "ltd", "llc", "plc", "vs", "mr", "mrs", "ms", "dr", "prof", "sr", "jr", "st",
@@ -761,9 +815,9 @@ def render(body: str, facts: list[dict], sources: dict) -> tuple[str, list[dict]
     def repl(m: re.Match) -> str:
         sids: list[str] = []
         for fid in CITE_RE.findall(m.group(0)):
-            sid = by_id[fid]["source_id"]
-            if sid not in sids:
-                sids.append(sid)
+            for sid in [by_id[fid]["source_id"], *by_id[fid].get("also_sources", [])]:  # a merged fact cites every source
+                if sid not in sids:
+                    sids.append(sid)
         links = []
         for sid in sids:
             order.setdefault(sid, len(order) + 1)
