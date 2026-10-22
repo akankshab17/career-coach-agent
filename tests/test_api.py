@@ -239,7 +239,7 @@ def test_defaults_and_blank_jd(env):
 # ---- access code ----
 
 def test_no_access_code_set_means_open(env):
-    assert env["client"].get("/health").json() == {"status": "ok", "access_code_required": False}
+    assert env["client"].get("/health").json() == {"status": "ok", "access_code_required": False, "private_briefs": False}
     assert env["client"].get("/auth").status_code == 200
 
 

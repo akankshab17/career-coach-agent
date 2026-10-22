@@ -4,7 +4,9 @@ POST /briefs queues a job and returns its id at once; one background worker runs
 (llm.py keeps per-run usage and fallback state in module globals, and Groq's limits are shared anyway).
 GET /briefs/{id} reports status, the current step and, when done, the brief. Jobs live in SQLite (jobs.py).
 
-If APP_ACCESS_CODE is set, every endpoint but /health needs it in the X-Access-Code header.
+If APP_ACCESS_CODE is set, every endpoint but /health needs it in the X-Access-Code header. In production (the Docker image)
+REQUIRE_ACCESS_CODE=1 makes the server refuse to start without one, PRIVATE_BRIEFS=1 turns off listing everyone's briefs,
+and MAX_BRIEFS_PER_DAY caps how many new briefs start per UTC day (shared Groq/Tavily quota).
 """
 from __future__ import annotations
 
@@ -14,6 +16,7 @@ import sys
 import threading
 import traceback
 from contextlib import asynccontextmanager
+from datetime import timedelta
 from typing import Callable, Literal
 
 from dotenv import load_dotenv
@@ -28,6 +31,22 @@ from location import DEFAULT_LOCATION
 ACCESS_ENV = "APP_ACCESS_CODE"
 ACCESS_HEADER = "X-Access-Code"
 MAX_QUEUED = 20  # more waiting jobs than this and new requests are refused (429)
+DAILY_ENV, DEFAULT_DAILY = "MAX_BRIEFS_PER_DAY", 30  # new briefs per UTC day (0 = no limit)
+REQUIRE_ENV, PRIVATE_ENV = "REQUIRE_ACCESS_CODE", "PRIVATE_BRIEFS"
+MIN_ACCESS_CODE = 16  # characters, when a code is required: there is no lockout after wrong guesses
+
+
+def _flag(name: str) -> bool:
+    return (os.getenv(name) or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def daily_limit() -> int:
+    raw = (os.getenv(DAILY_ENV) or "").strip()
+    if not raw:
+        return DEFAULT_DAILY
+    if not raw.isdigit():
+        raise ValueError(f"{DAILY_ENV} must be a whole number (0 = no limit), got '{raw}'")
+    return int(raw)
 STEPS = ("search", "fetch", "extract", "ground", "coverage", "search_more", "write", "finalize")
 Runner = Callable[..., BriefResult]  # graph.run_pipeline's signature
 
@@ -161,6 +180,7 @@ def require_access_code(x_access_code: str | None = Header(None)) -> None:
 # ---------- the app ----------
 
 def create_app(db_path: str = DB_PATH, runner: Runner = default_runner, start_worker: bool = True, store: JobStore | None = None) -> FastAPI:
+    daily_limit()  # a bad MAX_BRIEFS_PER_DAY fails at startup, not on the first request
     store = store or JobStore(db_path)
     worker = Worker(store, runner)
 
@@ -181,7 +201,7 @@ def create_app(db_path: str = DB_PATH, runner: Runner = default_runner, start_wo
 
     @app.get("/health")
     def health() -> dict:
-        return {"status": "ok", "access_code_required": bool(os.getenv(ACCESS_ENV))}
+        return {"status": "ok", "access_code_required": bool(os.getenv(ACCESS_ENV)), "private_briefs": _flag(PRIVATE_ENV)}
 
     @app.get("/auth", dependencies=guarded)
     def auth() -> dict:
@@ -192,6 +212,17 @@ def create_app(db_path: str = DB_PATH, runner: Runner = default_runner, start_wo
     def create_brief(req: BriefRequest) -> dict:
         if not req.force and (existing := store.find_reusable(input_key(req.company, req.role, req.level, req.location, req.jd))):
             return job_view(existing, reused=True)  # same inputs: a brief from the last REUSE_DAYS days, or one in progress
+        limit = daily_limit()
+        if limit:
+            now = store.now()
+            day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            started = store.count_created_since(day_start)
+            if started >= limit:
+                left = day_start + timedelta(days=1) - now
+                hours, minutes = divmod(int(left.total_seconds()) // 60, 60)
+                raise HTTPException(status_code=429, detail=(
+                    f"Daily limit reached: {started} new briefs have been started today (limit {limit}). New briefs can start "
+                    f"again at 00:00 UTC, in {hours}h {minutes}m. Briefs built in the last 7 days with the same inputs still open."))
         if store.count("queued") >= MAX_QUEUED:
             raise HTTPException(status_code=429, detail=f"{MAX_QUEUED} briefs are already waiting; try again later.")
         job = store.create(req.company, req.role, req.level, req.location, req.jd)
@@ -200,6 +231,8 @@ def create_app(db_path: str = DB_PATH, runner: Runner = default_runner, start_wo
 
     @app.get("/briefs", dependencies=guarded)
     def list_briefs(limit: int = Query(20, ge=1, le=100)) -> list[dict]:
+        if _flag(PRIVATE_ENV):  # everyone shares one access code; JDs can hold student details
+            raise HTTPException(status_code=403, detail="Listing briefs is turned off on this server (PRIVATE_BRIEFS).")
         return [{"job_id": j["id"], **{k: v for k, v in j.items() if k != "id"}} for j in store.recent(limit)]
 
     @app.get("/briefs/{job_id}", dependencies=guarded)
@@ -223,4 +256,8 @@ def serve() -> FastAPI:
     """The uvicorn factory: reads .env (API keys, APP_ACCESS_CODE), opens .cache/jobs.db, starts the worker. A factory rather
     than a module-level app, so importing this module (tests) creates no database and starts no thread."""
     load_dotenv()
+    code = os.getenv(ACCESS_ENV, "")
+    if _flag(REQUIRE_ENV) and len(code) < MIN_ACCESS_CODE:
+        raise RuntimeError(f"{REQUIRE_ENV} is on but {ACCESS_ENV} is {'not set' if not code else 'too short'}: set a random code of "
+                           f"at least {MIN_ACCESS_CODE} characters as a secret (refusing to start without one).")
     return create_app()

@@ -32,6 +32,13 @@ The user is learning: build in small steps, explain design decisions, stop after
   per-run, so never run two pipelines at once), progress via `RunStats.on_progress` (graph wraps every node), reuse < 7 days,
   optional `APP_ACCESS_CODE` (X-Access-Code header). `src/jobs.py` SQLite store `.cache/jobs.db` (the table is the queue;
   `running` rows are re-queued at startup). `app.py` Streamlit client (talks only to the API, `BRIEF_API_URL`).
+- Deploy (Hugging Face Spaces, Docker SDK): `Dockerfile` + `start.sh` (API on 127.0.0.1:8000, Streamlit on $PORT=7860, the only
+  exposed port), `.dockerignore` (no .env/.cache/evals/tests in the image), README YAML header = Space config. Image env:
+  `REQUIRE_ACCESS_CODE=1` (serve() refuses to start without an APP_ACCESS_CODE of 16+ chars), `PRIVATE_BRIEFS=1` (GET /briefs
+  403; the app lists only this browser session's briefs), `MAX_BRIEFS_PER_DAY=30` (new briefs per UTC day, all users; reuse
+  is free; 429 with the reset time). Free Space disk is ephemeral: jobs.db, extraction cache and spend.json reset on
+  restart; the user's prepaid OpenAI balance (auto-reload off) is the real fallback cap. `requirements.txt` = pinned
+  runtime deps; `requirements-dev.txt` adds pytest.
 - `evals/` eval harness (below). `tests/` pytest; `tests/helpers.py` has the fakes (`fake_llm`, `res`, `fact`).
   `tests/test_api.py` (TestClient + `fake_runner`), `tests/test_app.py` (Streamlit AppTest routed into the TestClient).
 
@@ -103,7 +110,8 @@ The user is learning: build in small steps, explain design decisions, stop after
 - **Fixtures and results are gitignored** (third-party page text; repo is public). `evals/baseline.json` (metrics only) IS committed.
 
 ## Conventions
-- Run `.venv/bin/pytest -q` yourself after changes and report the real result. Python 3.12 venv (LangGraph needs 3.10+).
+- Run `.venv/bin/pytest -q` yourself after changes and report the real result. Never deploy: the user pushes to the Space.
+  Keep `requirements.txt` pinned to versions the tests passed with. Python 3.12 venv (LangGraph needs 3.10+).
 - Never scrape Glassdoor (blocked in search, extract and sources). Search APIs only.
 - Never commit `.env`, eval fixtures, `eval_*.md`, `*.debug.md`. No API keys in fixtures (the harness refuses).
 - For big changes: explain the design first and WAIT for the user's OK. Otherwise do what was asked, then stop so they can test.

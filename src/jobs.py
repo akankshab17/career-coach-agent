@@ -110,6 +110,11 @@ class JobStore:
                               "FROM jobs ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
         return [dict(r) for r in rows]
 
+    def count_created_since(self, since: datetime) -> int:
+        """Jobs created at or after `since` (any status: a failed brief still used searches and tokens)."""
+        with closing(self._connect()) as db:
+            return db.execute("SELECT COUNT(*) FROM jobs WHERE created_at >= ?", (since.isoformat(),)).fetchone()[0]
+
     def count(self, status: str) -> int:
         with closing(self._connect()) as db:
             return db.execute("SELECT COUNT(*) FROM jobs WHERE status = ?", (status,)).fetchone()[0]

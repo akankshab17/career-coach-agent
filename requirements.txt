@@ -1,10 +1,11 @@
-tavily-python
-groq
-python-dotenv
-pytest
-openai
-langgraph
-pyyaml
-fastapi
-uvicorn
-streamlit
+# Runtime dependencies (the Docker image installs only these). Pinned to the versions the tests ran with.
+tavily-python==0.8.5
+groq==1.7.0
+python-dotenv==1.2.4
+openai==3.35.1
+langgraph==1.2.16
+pyyaml==6.0.3
+fastapi==0.157.0
+uvicorn==0.54.0
+streamlit==1.66.0
+httpx==0.28.1

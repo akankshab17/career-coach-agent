@@ -1,0 +1,19 @@
+# Never in the image: secrets, caches, recorded third-party pages, local outputs, tests.
+.env
+.env.*
+!.env.example
+.cache/
+.venv/
+evals/
+tests/
+examples/
+**/__pycache__/
+.pytest_cache/
+*.debug.md
+eval_*.md
+test*.md
+openai_test*.md
+last_run*.md
+.git/
+.DS_Store
+**/.DS_Store

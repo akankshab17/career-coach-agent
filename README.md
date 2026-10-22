@@ -1,3 +1,10 @@
+---
+title: Interview Brief
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 # Career Coach Research Agent
 
 Searches the web (Tavily) and writes a cited interview-prep brief (Groq or OpenAI, switchable).
@@ -5,7 +12,7 @@ Searches the web (Tavily) and writes a cited interview-prep brief (Groq or OpenA
 ## Setup
 ```
 python3.12 -m venv .venv && source .venv/bin/activate   # Python 3.10+ (LangGraph)
-pip install -r requirements.txt
+pip install -r requirements-dev.txt   # runtime deps (requirements.txt, pinned) + pytest
 cp .env.example .env   # then fill in TAVILY_API_KEY and GROQ_API_KEY
 ```
 
@@ -97,6 +104,75 @@ streamlit run app.py                                                       # ter
   header (401 otherwise) and the app asks for it once per browser session. If unset there is no check, which is only fine
   on your own machine. Before deploying publicly: set it, serve both over HTTPS (the code travels in a header), and keep the
   API reachable only where the app can call it. There is no lockout after wrong codes, so use a long random code.
+
+## Deploy to Hugging Face Spaces (free)
+The block at the top of this README (`sdk: docker`, `app_port: 7860`) is the Space's configuration; GitHub shows it as a
+small table. The `Dockerfile` runs both processes in one container (`start.sh`): the API on `127.0.0.1:8000`, reachable only
+from inside the container, and Streamlit on port 7860, the only port the Space exposes (over HTTPS). Production settings
+baked into the image: `REQUIRE_ACCESS_CODE=1` (the API refuses to start without an `APP_ACCESS_CODE` of 16+ characters),
+`PRIVATE_BRIEFS=1` (no shared list of briefs; each browser session sees only its own, since JDs can hold student details),
+`MAX_BRIEFS_PER_DAY=30` (new briefs per UTC day for everyone together; reusing a recent brief is free; `0` = no limit) and
+`EXTRACT_CONCURRENCY=2`. Any of them can be overridden with a Space variable. Keys exist only as Space secrets.
+
+**What the free Space does not keep.** The disk is wiped whenever the Space restarts, sleeps (after 48 hours without
+visitors) or is rebuilt: the jobs database (briefs, the 7-day reuse, today's count toward the daily limit), the extraction
+cache and `.cache/spend.json`. Because `spend.json` starts at $0 after every restart, `OPENAI_BUDGET_USD` cannot cap OpenAI
+spending across restarts. **The real cap is a prepaid OpenAI balance with auto-reload turned off**: when it runs out,
+fallback calls fail and the brief fails with a clear message. Keep it that way while the fallback is on.
+
+### 1. Test the image on your machine
+```
+docker build -t interview-brief .
+
+# It must refuse to start without an access code (expect "[start] the API exited during startup" and exit code 1):
+docker run --rm interview-brief; echo "exit code: $?"
+
+# Run it with your keys from .env and a fresh code:
+set -a; source .env; set +a
+export APP_ACCESS_CODE="$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')"; echo "code: $APP_ACCESS_CODE"
+docker run --rm --name interview-brief -p 7860:7860 \
+  -e TAVILY_API_KEY -e GROQ_API_KEY -e OPENAI_API_KEY \
+  -e FALLBACK_PROVIDER -e FALLBACK_EXTRACT_MODEL -e FALLBACK_WRITE_MODEL -e OPENAI_BUDGET_USD \
+  -e APP_ACCESS_CODE \
+  interview-brief
+```
+In a second terminal:
+```
+curl -s -o /dev/null -w "%{http_code}\n" http://localhost:7860/      # 200: Streamlit is up
+curl -s --max-time 3 http://localhost:8000/health || echo "API not reachable from outside: good"
+docker exec interview-brief python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8000/health').read())"
+```
+Then open http://localhost:7860: it asks for the code; enter it and build one brief (this one makes real Tavily/LLM
+calls). Stop with Ctrl+C.
+
+### 2. Create the Space
+1. On huggingface.co: **New Space**. Name it (e.g. `interview-brief`), **SDK: Docker** (blank template), **Hardware: CPU
+   basic (free)**, **Public** (coaches don't need an account; the access code protects it), then **Create Space**.
+2. In the Space: **Settings -> Variables and secrets**.
+   - **New secret** for each: `TAVILY_API_KEY`, `GROQ_API_KEY`, `OPENAI_API_KEY`, `APP_ACCESS_CODE` (generate a new one with
+     `python3 -c 'import secrets; print(secrets.token_urlsafe(24))'`; don't reuse the local test code).
+   - **New variable** for each: `FALLBACK_PROVIDER=openai`, `FALLBACK_EXTRACT_MODEL=gpt-5.6-luna`,
+     `FALLBACK_WRITE_MODEL=gpt-5.4-mini`, `OPENAI_BUDGET_USD=3.00`. Optional: `MAX_BRIEFS_PER_DAY`, `EXTRACT_CONCURRENCY`.
+3. Create a token at huggingface.co/settings/tokens with **write** access (git uses it as the password).
+
+### 3. Push the code
+```
+git log --all --oneline -- .env      # must print nothing: .env was never committed
+git remote add space https://huggingface.co/spaces/<HF_USERNAME>/interview-brief
+git push --force space main          # username: your HF username, password: the write token
+```
+`--force` replaces the starter README the Space was created with (only the first time). Later updates: commit, then
+`git push space main` (and `git push origin main` for GitHub).
+
+### 4. Check it
+- **Logs** tab: the build finishes, then the container log shows `Uvicorn running on http://127.0.0.1:8000` and
+  `You can now view your Streamlit app`. If it shows `REQUIRE_ACCESS_CODE is on but APP_ACCESS_CODE is not set`, the
+  secret is missing or misspelled.
+- Open `https://<HF_USERNAME>-interview-brief.hf.space`: it asks for the code; build one brief.
+- `curl -s https://<HF_USERNAME>-interview-brief.hf.space/health | head -c 200` returns Streamlit's HTML, not the API's JSON:
+  the API is not exposed.
+- Send coaches the URL and the code separately. To change the code, edit the secret; the Space restarts (and forgets its
+  briefs).
 
 ## Test
 ```

@@ -1,7 +1,8 @@
 """Streamlit front end for the brief API: streamlit run app.py  (start the API first; see README "Web app").
 
 A thin client: everything goes through the API at BRIEF_API_URL (default http://localhost:8000). If the API needs an
-access code (APP_ACCESS_CODE on the server), the app asks for it once per browser session.
+access code (APP_ACCESS_CODE on the server), the app asks for it once per browser session. If the API keeps briefs
+private (PRIVATE_BRIEFS, as in production), the sidebar lists only the briefs of this browser session.
 """
 from __future__ import annotations
 
@@ -39,6 +40,8 @@ def call(method: str, path: str, **kw) -> dict | list:
             detail = r.json().get("detail")
         except ValueError:
             detail = r.text
+        if r.status_code == 429 and isinstance(detail, str):  # daily limit / full queue: the API's message says it all
+            raise APIError(detail)
         raise APIError(f"API error {r.status_code}: {detail}")
     return r.json()
 
@@ -50,6 +53,7 @@ def require_access() -> None:
     except APIError as exc:
         st.error(str(exc))
         st.stop()
+    st.session_state["private"] = bool(health.get("private_briefs"))
     if not health.get("access_code_required") or st.session_state.get("access_ok"):
         return
     st.title("Interview brief")
@@ -69,12 +73,30 @@ def require_access() -> None:
 def open_job(job_id: str) -> None:
     st.session_state["job_id"] = job_id
     st.query_params["job"] = job_id
+    mine = st.session_state.setdefault("my_jobs", [])
+    if job_id not in mine:
+        mine.insert(0, job_id)
+
+
+def session_jobs() -> list[dict]:
+    """This browser session's briefs, newest first (private mode: nobody sees anyone else's)."""
+    jobs = []
+    for job_id in st.session_state.get("my_jobs", [])[:20]:
+        try:
+            jobs.append(call("GET", f"/briefs/{job_id}"))
+        except APIError:
+            continue  # gone (the server restarted with an empty database)
+    return jobs
 
 
 def sidebar() -> None:
-    st.sidebar.header("Recent briefs")
+    private = st.session_state.get("private")
+    st.sidebar.header("Your briefs" if private else "Recent briefs")
+    if private:
+        st.sidebar.caption("Only briefs from this browser session are listed. Reloading the page clears the list; "
+                           "a brief's own link (the ?job=... address) keeps working.")
     try:
-        jobs = call("GET", "/briefs", params={"limit": 20})
+        jobs = session_jobs() if private else call("GET", "/briefs", params={"limit": 20})
     except APIError as exc:
         st.sidebar.warning(str(exc))
         return
@@ -173,6 +195,8 @@ def show_job(job_id: str) -> None:
 def main() -> None:
     st.set_page_config(page_title="Interview brief", layout="wide")
     require_access()
+    if (linked := st.query_params.get("job")) and linked not in st.session_state.get("my_jobs", []):
+        open_job(linked)  # a brief opened from its link belongs to this session too
     sidebar()
     st.title("Interview brief")
     st.caption("Every sentence in a brief cites a source and was checked against that source's text.")
