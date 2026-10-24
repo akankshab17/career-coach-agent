@@ -2,8 +2,12 @@
 
 Give it a company, a role and a level. It searches the web and writes an interview-prep brief in which every sentence links to the page it came from.
 
+**Live demo: [interview-brief.onrender.com](https://interview-brief.onrender.com).** It needs an access code, which I share on request so the API credits behind it aren't used up. The first load can take about a minute, because the free tier puts the service to sleep when nobody is using it.
+
+![Screenshot](docs/screenshot.png)
+
 ![Python 3.12](https://img.shields.io/badge/python-3.12-blue)
-![Tests](https://img.shields.io/badge/tests-462%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-518%20passing-brightgreen)
 ![Pipeline](https://img.shields.io/badge/pipeline-LangGraph-informational)
 
 ## Why I built this
@@ -25,6 +29,21 @@ An excerpt from a real brief (Amazon, Software Developer, new grad), section 2. 
 > - Candidates report that one third round included a variation of LRU Cache and Top K elements, plus a question about critical feedback and improving shortcomings. [4](https://www.reddit.com/r/leetcode/comments/1g6205e/my_amazon_swe1_new_grad_interview_experience)[3](https://leetcode.com/discuss/post/6393977/amazon-sde-1-interview-experience-select-ldzi)
 
 Every brief has the same six sections: TL;DR, company overview and recent news, interview process (grouped by stage), what the role really needs, how to prepare, and questions to ask the interviewer. It ends with the list of cited sources and a line saying how many facts were checked and how many were rejected.
+
+**Performance:** about 4 minutes per brief on Render's free tier (0.1 CPU), and faster when run locally.
+
+## Example output
+
+[examples/amazon-sde-new-grad.md](examples/amazon-sde-new-grad.md) is a full brief for Amazon, Software Development Engineer, new grad. The interview process is built from new-grad candidates' own reports, each one cited. The role section comes from a real early-career posting on amazon.jobs, and every claim links to a numbered source at the end.
+
+## Known limitations
+
+- It relies on public web sources found through search APIs. Glassdoor is never used.
+- Forum posts can be noisy or out of date, so they are labelled as candidate reports rather than stated as fact.
+- Companies with little public data get thinner briefs.
+- The free hosting tier resets the brief history whenever the service sleeps.
+
+More detail is in [Limitations and roadmap](#limitations-and-roadmap) below.
 
 ## How it works
 
@@ -172,7 +191,7 @@ All settings are in `.env` (copy `.env.example`). The main ones:
 
 ### Tests and evals
 ```
-pytest                                          # 462 tests, no network calls
+pytest                                          # 518 tests, no network calls
 RUN_DOCKER_TESTS=1 pytest tests/test_deploy.py  # also builds and runs the Docker image (needs Docker)
 
 python evals/run_evals.py --record              # live: records search results and pages to evals/fixtures/
