@@ -1,5 +1,5 @@
-# The web app (Streamlit + the FastAPI API) in one container, for Hugging Face Spaces (Docker SDK).
-# Only Streamlit is exposed (port 7860); the API listens on 127.0.0.1:8000 inside the container.
+# The web app (Streamlit + the FastAPI API) in one container (deployed on Render's free web service, see render.yaml).
+# Only Streamlit is exposed (on $PORT); the API listens on 127.0.0.1:8000 inside the container.
 # API keys and APP_ACCESS_CODE come from the platform's secrets as environment variables: nothing secret is in the image.
 FROM python:3.12-slim
 
@@ -12,7 +12,7 @@ ENV PYTHONUNBUFFERED=1 \
     MAX_BRIEFS_PER_DAY=5 \
     EXTRACT_CONCURRENCY=2
 
-# Hugging Face runs Spaces as uid 1000; the app writes .cache/ (jobs.db, extraction cache, spend.json) under its working
+# The app runs as an unprivileged user (uid 1000) and writes .cache/ (jobs.db, extraction cache, spend.json) under its working
 # directory. WORKDIR alone would create /home/user/app owned by root (PermissionError on '.cache'), so the directory and
 # .cache/ are created and handed to the user here, before USER.
 RUN useradd --create-home --uid 1000 user \

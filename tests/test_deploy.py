@@ -145,8 +145,22 @@ def test_the_image_keeps_secrets_out_and_production_settings_on():
     assert ".env" not in [line.split()[1] for line in docker.splitlines() if line.startswith("COPY")]
     start = (ROOT / "start.sh").read_text()
     assert "--host 127.0.0.1 --port 8000" in start and "--server.address 0.0.0.0" in start  # only Streamlit is reachable
-    readme = (ROOT / "README.md").read_text()
-    assert readme.startswith("---\n") and "sdk: docker" in readme and "app_port: 7860" in readme  # the Space's config
+    assert 'PORT="${PORT:-7860}"' in start and 'STARTUP_WAIT="${STARTUP_WAIT:-180}"' in start  # Render's 0.1 CPU starts slowly
+
+
+def test_the_render_blueprint_is_free_has_a_health_check_and_holds_no_secret_values():
+    import yaml
+
+    blueprint = yaml.safe_load((ROOT / "render.yaml").read_text())
+    (service,) = blueprint["services"]
+    assert (service["type"], service["runtime"], service["plan"]) == ("web", "docker", "free")
+    assert service["healthCheckPath"] == "/_stcore/health" and service["dockerfilePath"] == "./Dockerfile"
+    env = {e["key"]: e for e in service["envVars"]}
+    for secret in ("APP_ACCESS_CODE", "TAVILY_API_KEY", "GROQ_API_KEY", "OPENAI_API_KEY"):
+        assert env[secret] == {"key": secret, "sync": False}, secret  # asked for in Render's dashboard, never stored here
+    assert env["PORT"]["value"] == "10000" and env["FALLBACK_PROVIDER"]["value"] == "openai"
+    assert all("value" not in e or not str(e["value"]).startswith(("gsk_", "tvly-", "sk-")) for e in service["envVars"])
+    assert not (ROOT / "README.md").read_text().startswith("---")  # the Hugging Face header is gone
 
 
 # ---- the container can write its .cache ----

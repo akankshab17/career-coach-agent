@@ -1,0 +1,32 @@
+# Render Blueprint: one free web service built from the Dockerfile. Secrets are NOT stored here: "sync: false" makes
+# Render ask for each value in the dashboard when the Blueprint is created (Environment tab afterwards).
+# Production settings (REQUIRE_ACCESS_CODE, PRIVATE_BRIEFS, MAX_BRIEFS_PER_DAY, EXTRACT_CONCURRENCY) come from the Dockerfile;
+# add an env var here or in the dashboard to override one.
+services:
+  - type: web
+    name: interview-brief
+    runtime: docker
+    plan: free
+    region: oregon
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /_stcore/health   # Streamlit's own health endpoint (the API is not reachable from outside)
+    envVars:
+      - key: PORT
+        value: "10000"
+      - key: APP_ACCESS_CODE
+        sync: false
+      - key: TAVILY_API_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: FALLBACK_PROVIDER
+        value: openai
+      - key: FALLBACK_EXTRACT_MODEL
+        value: gpt-5.6-luna
+      - key: FALLBACK_WRITE_MODEL
+        value: gpt-5.4-mini
+      - key: OPENAI_BUDGET_USD
+        value: "3.00"
