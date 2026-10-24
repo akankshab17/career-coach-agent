@@ -4,7 +4,9 @@ Give it a company, a role and a level. It searches the web and writes an intervi
 
 **Live demo: [interview-brief.onrender.com](https://interview-brief.onrender.com).** It needs an access code, which I share on request so the API credits behind it aren't used up. The first load can take about a minute, because the free tier puts the service to sleep when nobody is using it.
 
-![Screenshot](docs/screenshot.png)
+![Input form](docs/form.png)
+
+![Example brief with citations](docs/screenshot.png)
 
 ![Python 3.12](https://img.shields.io/badge/python-3.12-blue)
 ![Tests](https://img.shields.io/badge/tests-518%20passing-brightgreen)
@@ -17,8 +19,6 @@ I work as a graduate peer career coach at Indiana University. Before every stude
 I built this to do that prep for me, and to produce a brief I can trust in front of a student. The rule I designed around: **every fact in the brief is tied to a real source, and the code checks that the source says it.** If the pipeline can't back a sentence with a quote from a page, the sentence doesn't make it into the brief.
 
 ## Demo
-
-![Demo: building a brief in the web app](docs/demo.gif)
 
 An excerpt from a real brief (Amazon, Software Developer, new grad), section 2. Each number links to the source:
 
