@@ -156,3 +156,49 @@ def test_level_codes_count_only_without_a_new_grad_marker_and_technical_staff_is
     assert search.title_level(mts) == "new-grad" and search.posting_level_conflict(mts, "new-grad") is None
     kept, _ = search.filter_interview([amazon, mts], "Amazon", "Software Developer", "new-grad")
     assert kept == [amazon]  # (mts names another company)
+
+
+# ---- mid-level postings without a level in the title (Amazon "Software Development Engineer, Data Center Builder Tools") ----
+
+AMAZON_MID = ("BASIC QUALIFICATIONS\n- 3 years of professional software development experience (non-internship)\n"
+              "- 2 years of design or architecture experience\n")
+
+
+@pytest.mark.parametrize("text", [
+    AMAZON_MID,
+    "- 3+ years of non-internship professional software development experience",
+    "- 3 years of non-internship professional software development experience",
+    "You have at least 3 years of experience shipping production code.",
+    "Requirements: 3-5 years in backend development.",
+    "Minimum of 4 years' experience with distributed systems.",
+])
+def test_any_phrasing_of_three_or_more_years_rejects_a_new_grad_posting(text):
+    posting = res(1, "Software Development Engineer, Data Center Builder Tools", "https://www.amazon.jobs/en/jobs/10513782/x")
+    assert search.posting_level_conflict(posting, "new-grad", LONG + text).startswith("asks for ")
+    assert search.posting_level_conflict(posting, "intern", text)
+
+
+@pytest.mark.parametrize("duty", [
+    "Mentor junior engineers and review their designs.", "You will lead code reviews for the team.",
+    "Drive technical design decisions across the org.", "Lead design decisions for new services.",
+    "Own the architecture of our build tooling.",
+])
+def test_senior_duties_reject_a_new_grad_posting(duty):
+    posting = res(1, "Software Development Engineer", "https://www.amazon.jobs/en/jobs/10513782/x")
+    assert search.posting_level_conflict(posting, "new-grad", LONG + " " + duty).startswith("senior duties")
+    assert search.posting_level_conflict(posting, "experienced", duty) is None
+
+
+def test_a_real_new_grad_posting_still_passes():
+    text = (LONG + " Bachelor's degree, 0-1 years of experience. You'll be mentored by senior engineers, take part in code "
+            "reviews and contribute to design discussions. Amazon has 25 years of experience serving customers.")
+    posting = res(1, "Software Development Engineer I, New Grad", "https://www.amazon.jobs/en/jobs/2000000/x")
+    assert search.posting_level_conflict(posting, "new-grad", text) is None
+
+
+def test_the_amazon_mid_level_posting_is_excluded_when_fetched(monkeypatch):
+    url = "https://www.amazon.jobs/en/jobs/10513782/software-development-engineer-data-center-builder-tools"
+    monkeypatch.setattr(search, "extract", lambda urls, client=None: {u: LONG + AMAZON_MID for u in urls})
+    sources = {"S1": {**res(1, "Software Development Engineer, Data Center Builder Tools", url), "group": "careers", "kind": "company"}}
+    search.fetch_full_text(sources, level="new-grad")
+    assert sources["S1"]["excluded"] == "not a new-grad posting: asks for 3+ years of experience"

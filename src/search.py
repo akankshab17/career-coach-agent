@@ -621,11 +621,22 @@ SENIOR_TITLE_RE = re.compile(
 # count when the title has no intern / new-grad marker: "SDE-1 (L4 - New Grad)" is new-grad evidence.
 LEVEL_CODE_RE = re.compile(r"\b(?:l[4-9]a?|e[4-9]|ic[3-9])\b", re.I)
 PHD_RE = re.compile(r"\bph\.?\s?d\b", re.I)
-# "5+ years of experience", "at least 3 years' professional experience", "3-5 yrs exp", "4 YOE", "YOE: 6".
+# "5+ years of experience", "at least 3 years' professional experience", "3-5 yrs exp", "4 YOE", "YOE: 6", Amazon's
+# "3+ years of non-internship professional software development experience" (any words between, within one clause), and a
+# bare range "3-5 years" (a posting's range is always experience).
 YEARS_RE = re.compile(
-    r"\b(\d{1,2})\s*\+?\s*(?:[-–]\s*\d{1,2}\s*\+?\s*)?(?:years?|yrs?)'?(?:\s+of)?(?:\s+[\w-]+){0,3}?\s+(?:experience|exp)\b|"
+    r"\b(\d{1,2})\s*\+?\s*(?:(?:[-–]|to)\s*\d{1,2}\s*\+?\s*)?(?:years?|yrs?)\b'?(?=[^.;\n]{0,80}?\b(?:experience|exp)\b)|"
+    r"\b(\d{1,2})\s*\+?\s*(?:[-–]|to)\s*\d{1,2}\s*\+?\s*(?:years?|yrs?)\b|"
     r"\b(\d{1,2})\s*\+?\s*yoe\b|\byoe\s*[:=]?\s*(\d{1,2})\b", re.I)
+# Duties only someone past new grad is hired for: "mentor junior engineers", "lead code reviews", "drive technical design
+# decisions", "own the architecture". A new grad is mentored and takes part in code reviews; that doesn't match.
+SENIOR_DUTY_RE = re.compile(
+    r"\bmentor(?:s|ing)?\s+(?:and\s+\w+\s+)?(?:junior|less experienced|other|new(?:er)?)\s+(?:engineers?|developers?|team members?)\b|"
+    r"\blead(?:s|ing)?\s+(?:the\s+team'?s?\s+)?code reviews?\b|"
+    r"\b(?:drive|drives|driving|lead|leads|leading|make|makes|making)\s+(?:key\s+|the\s+)?(?:technical\s+)?(?:design|architecture|architectural)\s+decisions?\b|"
+    r"\b(?:own|owns|owning)\s+(?:the\s+)?(?:system\s+|technical\s+|overall\s+)?architecture\b", re.I)
 MIN_SENIOR_YEARS = 3  # asking for (or having) this many years of experience is not an intern or new-grad profile
+MAX_REQUIRED_YEARS = 15  # no posting asks for more; bigger numbers are the company's age
 EARLY_LEVELS = ("intern", "new-grad")
 
 
@@ -634,8 +645,10 @@ def _head(result: dict) -> str:
 
 
 def experience_years(text: str) -> int:
-    """The most years of experience the text asks for or mentions (0 if none). '3-5 years' counts as 3."""
-    return max((int(next(g for g in m.groups() if g)) for m in YEARS_RE.finditer(text or "")), default=0)
+    """The most years of experience the text asks for or mentions (0 if none). '3-5 years' counts as 3. More than
+    MAX_REQUIRED_YEARS is company history ("25 years of experience serving customers"), not a requirement."""
+    found = (int(next(g for g in m.groups() if g)) for m in YEARS_RE.finditer(text or ""))
+    return max((n for n in found if n <= MAX_REQUIRED_YEARS), default=0)
 
 
 def explicit_level(result: dict) -> str | None:
@@ -654,15 +667,20 @@ def explicit_level(result: dict) -> str | None:
 def posting_level_conflict(result: dict, level: str, text: str | None = None) -> str | None:
     """Why a posting is for another level than an intern / new-grad candidate's (None = no conflict): its title or URL says
     PhD, senior, staff, principal, II/III or a level code, or its text (snippet, or `text` once fetched) asks for
-    MIN_SENIOR_YEARS+ years of experience. A body that merely mentions a PhD ("BS, MS or PhD") is fine."""
+    MIN_SENIOR_YEARS+ years of experience, or lists senior duties (mentoring junior engineers, leading code reviews, driving
+    design decisions, owning architecture). A body that merely mentions a PhD ("BS, MS or PhD") is fine."""
     if level not in EARLY_LEVELS:
         return None
     head = _head(result)
     if m := (SENIOR_TITLE_RE.search(head) or PHD_RE.search(head)
              or (classify_level(result) not in EARLY_LEVELS and LEVEL_CODE_RE.search(head))):
         return f"title says {m.group(0).strip()!r}"
-    years = experience_years(text if text is not None else result.get("content") or "")
-    return f"asks for {years}+ years of experience" if years >= MIN_SENIOR_YEARS else None
+    body = text if text is not None else result.get("content") or ""
+    years = experience_years(body)
+    if years >= MIN_SENIOR_YEARS:
+        return f"asks for {years}+ years of experience"
+    duty = SENIOR_DUTY_RE.search(body)
+    return f"senior duties ({duty.group(0)!r})" if duty else None
 
 
 def title_level(result: dict) -> str | None:
