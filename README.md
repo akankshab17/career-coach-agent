@@ -45,7 +45,7 @@ The pipeline is a LangGraph graph (`src/graph.py`). Each step prints one line to
 | **ground** | Code only. A fact is kept only if its quote really appears in the page text. Rejections are logged with a reason. |
 | **coverage** | Fewer than 2 interview or role facts triggers one follow-up search for the thin section. |
 | **write** | One LLM call. The writer sees only grounded facts (at most 30) and cites them as `[F3]`. |
-| **finalize** | Code only. Drops uncited sentences and numbers that aren't in the cited facts, labels forum reports and other-level facts, renders the citations as links. |
+| **finalize** | Code only. Drops uncited sentences and numbers that aren't in the cited facts, strips leftover labels ("Key Topics:"), labels forum reports and other-level facts, renders the citations as links. |
 
 Every run also writes a debug report: per-source fact counts, every rejected fact with its quote, every dropped sentence and why.
 
@@ -59,24 +59,24 @@ Every run also writes a debug report: per-source fact counts, every rejected fac
 
 **Provider fallback with a spend cap.** When Groq's free tier hits a daily limit, only the task whose model hit it (extract or write) switches to OpenAI for the rest of the run. OpenAI spend is priced per call and summed in `.cache/spend.json`; past `OPENAI_BUDGET_USD` the run stops with a clear message. All of this lives in `src/llm.py`, the only file that knows about providers, and it is thread-safe because extraction runs in parallel.
 
-**Source types and filters.** Every source is typed: official posting, company site, third-party guide, job aggregator, forum or blog, news. Role facts come from the official posting first. Postings must belong to the company (named in the title or URL), match the requested level ("Engineer I" and "Associate" count as new grad), and be in the requested location. A posting that requires another country is rejected even when its footer lists US offices. Interview reports must name the company in the title or URL and match the role family, so a hardware internship post can't stand in for a software one. Glassdoor is never searched or fetched: the project uses search APIs only.
+**Source types and filters.** Every source is typed: official posting, company site, third-party guide, job aggregator, forum or blog, news. Role facts come from the official posting first. Postings must belong to the company (named in the title or URL), match the requested level ("Engineer I" and "Associate" count as new grad), and be in the requested location. For an intern or new-grad request, a posting whose title says PhD, Senior, Staff, Principal, II/III or a level code, or whose text asks for 3+ years of experience, is rejected; if no posting is left, section 3 gets labelled general guidance for the role family. A posting that requires another country is rejected even when its footer lists US offices. Interview reports must name the company in the title or URL and match the role family, so a hardware internship post can't stand in for a software one. For an intern or new-grad request, reports about senior candidates are dropped too: the level comes from the title or URL (L4, L5A, SSE, SDE2, SWE II, Senior, Staff) and, for forum and blog posts, from the text itself (3+ years of experience, a level code), so an unlabelled post by an engineer with 5 YOE is no longer new-grad evidence. Glassdoor is never searched or fetched: the project uses search APIs only.
 
 **Choosing the writer's 30 facts.** The writer gets a fixed budget, so the selection matters. Facts are scored by specificity (named problems, topics and questions, numbers, concrete requirements score up; marketing lines score down). Near-duplicates from several sources merge into one fact that cites all of them. At least 3 slots go to candidates' own reports when there are any, because official pages otherwise fill every slot with generic process text.
 
-**Record and replay evals.** Five fixed cases (Google intern, Cummins new-grad SWE, Perplexity AI engineer, Salesforce APM, Amazon new-grad SDE) run through the whole pipeline. Recording happens at the Tavily client, so in replay all of my own code runs exactly as it does live and only the network is replaced. Each run prints a table per case, compares it with the previous run and a committed baseline, and fails on regressions. It also warns when the LLM provider differs between runs, because those numbers aren't comparable.
+**Record and replay evals.** Six fixed cases (Google intern, Cummins new-grad SWE, Perplexity AI engineer, Salesforce APM, Amazon new-grad SDE, Uber new-grad SWE) run through the whole pipeline. Recording happens at the Tavily client, so in replay all of my own code runs exactly as it does live and only the network is replaced. Each run prints a table per case, compares it with the previous run and a committed baseline, and fails on regressions. It also warns when the LLM provider differs between runs, because those numbers aren't comparable.
 
 ## Results
 
 | | |
 |---|---|
-| Tests | 462 passing (`pytest`), plus an opt-in test that builds and runs the Docker image |
+| Tests | 505 passing (`pytest`), plus an opt-in test that builds and runs the Docker image |
 | Sentences dropped by finalize | 58% in the first design (write, then verify); 4 of 178 (about 2%) across the five baseline briefs |
 | Time per brief, uncached | 39 to 112 seconds end to end in the last live recording of the five cases |
 | Tokens per brief, uncached | 10k to 32k input, 3.7k to 13k output |
 | LLM cost per brief | $0 on Groq's free tier; $0.003 to $0.05 in the last recording, where most extraction ran on the OpenAI fallback |
 | Tavily credits per brief | about 9 to 17 (searches, page extracts, and the follow-up search when it runs) |
 
-Eval baseline (`evals/baseline.json`, pinned 2026-10-22, all Groq models, replay):
+Eval baseline (`evals/baseline.json`, pinned 2026-10-22, Uber added 2026-10-24, all Groq models):
 
 | Case | Interview facts | Role facts | Company facts | Grounded | Rejected | Sentences dropped | Empty sections |
 |---|---|---|---|---|---|---|---|
@@ -85,6 +85,7 @@ Eval baseline (`evals/baseline.json`, pinned 2026-10-22, all Groq models, replay
 | Perplexity, AI engineer new grad | 17 | 22 | 32 | 78 | 7 | 1 | 0 |
 | Salesforce, APM new grad | 10 | 8 | 11 | 30 | 3 | 1 | 0 |
 | Amazon, SDE new grad | 53 | 60 | 19 | 136 | 25 | 0 | 0 |
+| Uber, SWE new grad | 3 | 31 | 19 | 53 | 2 | 4 | 0 |
 
 Cummins shows the weak spot: there is very little public interview data for it, so the interview section is thin (see Limitations).
 
@@ -95,6 +96,8 @@ Cummins shows the weak spot: there is very little public interview data for it, 
 **Pages that were all menu.** Careers pages often open with thousands of characters of navigation. The extractor only saw the first 6,000 characters, which were all menu, so it returned no facts. Worse, that empty result was cached by URL and reused forever. Pages are now cut by relevance (text blocks scored with keywords for the page's purpose, menus and headings score nothing), and the cache key includes a hash of the exact text the extractor read.
 
 **Postings from the wrong company.** Siemens' early-career page once became Cummins' job posting, Atlassian's APM page stood in for Salesforce's, and Google's "posting" was a PhD internship that requires living in the UK. Posting selection only checked the level. It now also requires the company in the title, URL or employer line, and rejects postings that require another country.
+
+**A PhD posting in a new-grad brief.** The live Uber new-grad brief built its role section from "Graduate 2026 PhD Software Engineer II (AV Labs)": the word "Graduate" made it look like a new-grad posting. Its interview section also cited reports from L4, L5A and SSE candidates. Senior and PhD markers now win over "Graduate", postings that ask for 3+ years are rejected, and interview sources get their level from the page itself, not just the extractor's label.
 
 **A race in the extraction cache.** After I parallelised extraction, the cache decided which model had answered a call by reading the global settings after the call. If another thread hit Groq's daily limit and switched the run to OpenAI in the meantime, a Groq answer was filed under OpenAI's cache key. Each thread now records which model served its own call, and a test reproduces the exact interleaving with thread events.
 

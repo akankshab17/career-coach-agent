@@ -254,3 +254,10 @@ def test_an_access_code_is_required_when_set(env, monkeypatch):
     ok = {"X-Access-Code": "s3cret"}
     assert c.get("/auth", headers=ok).status_code == 200
     assert c.post("/briefs", json=REQ, headers=ok).status_code == 202
+
+
+def test_a_lowercase_company_is_stored_and_run_title_cased(env):
+    job = post(env, company="uber")
+    assert job["company"] == "Uber"
+    env["worker"].process_next()
+    assert env["calls"][0][0] == "Uber"

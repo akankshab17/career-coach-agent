@@ -27,6 +27,7 @@ import llm
 from brief import BriefResult, RunStats
 from jobs import DB_PATH, JobStore, input_key
 from location import DEFAULT_LOCATION
+from search import display_company
 
 ACCESS_ENV = "APP_ACCESS_CODE"
 ACCESS_HEADER = "X-Access-Code"
@@ -73,6 +74,11 @@ class BriefRequest(BaseModel):
         if not v.strip():
             raise ValueError("must not be blank")
         return v.strip()
+
+    @field_validator("company")
+    @classmethod
+    def title_case_company(cls, v: str) -> str:
+        return display_company(v)  # "uber" is stored, listed and briefed as "Uber"
 
     @field_validator("jd")
     @classmethod

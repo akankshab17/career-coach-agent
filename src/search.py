@@ -57,6 +57,13 @@ def is_blocked(url: str) -> bool:
     return any(host == d or host.endswith("." + d) for d in BLOCKED_DOMAINS) or host.startswith("glassdoor.") or ".glassdoor." in host
 
 
+def display_company(company: str) -> str:
+    """'uber' -> 'Uber', 'jp morgan' -> 'Jp Morgan': a name typed all in lowercase is shown title-cased. Any capital letter
+    means the user chose the spelling ('eBay', 'IBM', 'OpenAI'), so it is kept."""
+    name = " ".join(company.split())
+    return " ".join(w[:1].upper() + w[1:] for w in name.split(" ")) if name == name.lower() else name
+
+
 def _slug(company: str) -> str:
     return re.sub(r"[^a-z0-9]", "", company.lower())
 
@@ -81,7 +88,7 @@ JOB_AGGREGATORS = ("jobright.ai", "indeed.com", "linkedin.com", "ziprecruiter.co
                    "wellfound.com", "themuse.com", "builtin.com", "joinhandshake.com", "levels.fyi", "monster.com", "careerbuilder.com",
                    "dice.com", "snagajob.com", "jooble.org", "adzuna.com", "glassdoor.com")
 ATS_HOSTS = ("greenhouse.io", "lever.co", "myworkdayjobs.com", "icims.com", "smartrecruiters.com", "ashbyhq.com", "workable.com", "taleo.net")
-JOB_PATH_RE = re.compile(r"/jobs?/|/job-|/careers?/(?:listing|apply|jobs?|openings?|positions?)\b|/listing/|/positions?/|/openings?/|/requisition", re.I)
+JOB_PATH_RE = re.compile(r"/jobs?/|/job-|/careers?/(?:listing|apply|jobs?|openings?|positions?)\b|/careers?/list/\d|/listing/|/positions?/|/openings?/|/requisition", re.I)
 CAREERS_PATH_RE = re.compile(r"/careers?\b|/jobs\b|/university|/early-career|/students?|/campus|/graduates?|/internships?|/new-grads?|/early-talent", re.I)
 SOURCE_TYPES = ("official-posting", "company-site", "third-party-guide", "job-aggregator", "forum/blog", "news")
 TYPE_LABEL = {"official-posting": "official posting", "company-site": "company site", "third-party-guide": "third-party guide",
@@ -264,12 +271,16 @@ def posting_belongs_to(result: dict, company: str) -> bool:
     return bool(company.strip()) and bool(re.search(EMPLOYER_LINE_RE + words + r"\b", result.get("content") or "", re.I))
 
 
-def interview_filter_reason(result: dict, company: str, role: str) -> str | None:
-    """Why an interview result is irrelevant (None = keep it)."""
+def interview_filter_reason(result: dict, company: str, role: str, level: str | None = None) -> str | None:
+    """Why an interview result is irrelevant (None = keep it). For an intern / new-grad candidate, a page about a senior
+    candidate (title/URL says L5, SSE, SDE2, Senior...; or a forum/blog post whose text gives 3+ YOE or a level code) is
+    another level's evidence."""
     if not mentions_company(result, company):
         return "other-company"
     if not matches_role_family(result, role):
         return f"other-role-family (wanted {role_family(role)})"
+    if level in EARLY_LEVELS and interview_level(result) == "experienced":
+        return f"other-level (wanted {level}, page is about an experienced candidate)"
     return None
 
 
@@ -327,19 +338,20 @@ def forum_counts(found: list[dict], kept: list[dict], company: str) -> dict:
             "kept": sum(source_kind(r["url"], company) == "forum" for r in kept)}
 
 
-def interview_search(forum_results: list[dict], other_results: list[dict], company: str, role: str) -> tuple[list[dict], list[dict], dict]:
+def interview_search(forum_results: list[dict], other_results: list[dict], company: str, role: str,
+                     level: str | None = None) -> tuple[list[dict], list[dict], dict]:
     """Dedupe, drop forum listing pages, filter for relevance. Returns (kept, filtered, forum counts)."""
     found = _dedupe(forum_results + other_results)
     candidates, listings = drop_forum_listings(found)
-    kept, filtered = filter_interview(candidates, company, role)
+    kept, filtered = filter_interview(candidates, company, role, level)
     return kept, listings + filtered, forum_counts(found, kept, company)
 
 
-def filter_interview(results: list[dict], company: str, role: str) -> tuple[list[dict], list[dict]]:
+def filter_interview(results: list[dict], company: str, role: str, level: str | None = None) -> tuple[list[dict], list[dict]]:
     """(kept, filtered) where filtered entries are {url, title, reason}."""
     kept, filtered = [], []
     for r in results:
-        reason = interview_filter_reason(r, company, role)
+        reason = interview_filter_reason(r, company, role, level)
         if reason:
             filtered.append({"url": r["url"], "title": r["title"], "reason": reason})
         else:
@@ -487,13 +499,20 @@ def is_posting(source: dict) -> bool:
     return source.get("group") in ("posting", "role") or source.get("type") == "official-posting"
 
 
+def is_single_posting(source: dict) -> bool:
+    """One job's posting (not a careers page covering several programs, which may ask "5+ years" of another program)."""
+    return (source.get("group") == "posting" or source.get("type") == "official-posting"
+            or bool(JOB_PATH_RE.search(source.get("url", ""))))
+
+
 def fetch_full_text(sources: dict[str, dict], focus: list[str] | dict[str, list[str]] | None = None, company: str = "",
-                    location: str | None = None) -> tuple[int, int]:
+                    location: str | None = None, level: str | None = None) -> tuple[int, int]:
     """Attach `full_text` (in place) to every careers/interview/forum/posting source and the top company sources.
 
     A page that fits in FULL_TEXT_CHARS is kept whole. For a longer one, `focus` (a keyword list, or the {purpose: list}
     map from focus_map) picks the relevant FULL_TEXT_CHARS; without it the page head is used.
-    A posting whose text requires the candidate to be outside `location` gets no text and an `excluded` reason instead.
+    A posting whose text requires the candidate to be outside `location`, or (for an intern / new-grad `level`) asks for
+    another level's experience, gets no text and an `excluded` reason instead.
     Returns (fetched, failed). Sources that already have text (the posting, a JD) are left alone.
     """
     company_ids = [sid for sid, s in sources.items() if s.get("group") == "company"][:FULL_TEXT_COMPANY]
@@ -509,6 +528,9 @@ def fetch_full_text(sources: dict[str, dict], focus: list[str] | dict[str, list[
             text = texts[sources[sid]["url"]]
             if is_posting(sources[sid]) and (req := required_location_elsewhere(text, location)):
                 sources[sid]["excluded"] = f"requires a location outside {location}: \"{req}\""
+                continue
+            if level and is_single_posting(sources[sid]) and (conflict := posting_level_conflict(sources[sid], level, text)):
+                sources[sid]["excluded"] = f"not a {level} posting: {conflict}"
                 continue
             sources[sid]["full_text"] = _fit(text, focus, sources[sid], company)
     fetched = sum(sources[sid]["url"] in texts for sid in wanted)
@@ -572,7 +594,7 @@ def rank(results: list[dict], company: str) -> list[dict]:
 
 def classify_level(result: dict) -> str:
     """Guess a posting's level from its title and URL (not the body, which mentions interns in passing)."""
-    text = f"{result['title']} {result['url']}".lower()
+    text = f"{result.get('title', '')} {result.get('url', '')}".lower()
     if re.search(r"\bintern(ship)?s?\b", text):  # \b so "Internal Systems" doesn't match
         return "intern"
     if re.search(r"new[ -]?grad|university[ -]grad|early[ -]career|graduate|entry[ -_]?level", text):
@@ -589,14 +611,91 @@ SENIOR_RE = re.compile(r"\b(?:senior|sr\.?|staff|principal|lead|manager|director
                        r"\b(?:engineer|developer|scientist|analyst)[\s_-]+(?:ii|iii|iv|[2-5])\b", re.I)
 
 
+# A title/URL for someone further along than an intern or new grad, even when it also says "Graduate": "Graduate 2026 PhD
+# Software Engineer II (AV Labs)" once became Uber's new-grad posting. Senior/staff/principal titles, SSE, "Engineer II",
+# "SWE II", "SDE2". "Lead"/"manager" are not here (APM is a new-grad role), nor "Member of Technical Staff".
+SENIOR_TITLE_RE = re.compile(
+    r"\b(?:senior|sr\.?|(?<!technical )staff|principal|distinguished|mid[- ]level|sse)\b|"
+    r"\b(?:engineer|developer|scientist|analyst|sde|swe)[\s_-]*(?:ii|iii|iv|[2-5])\b", re.I)
+# Company level codes mean different things per company (Amazon's new-grad SDE I is L4, Uber's L4 is SWE II), so they only
+# count when the title has no intern / new-grad marker: "SDE-1 (L4 - New Grad)" is new-grad evidence.
+LEVEL_CODE_RE = re.compile(r"\b(?:l[4-9]a?|e[4-9]|ic[3-9])\b", re.I)
+PHD_RE = re.compile(r"\bph\.?\s?d\b", re.I)
+# "5+ years of experience", "at least 3 years' professional experience", "3-5 yrs exp", "4 YOE", "YOE: 6".
+YEARS_RE = re.compile(
+    r"\b(\d{1,2})\s*\+?\s*(?:[-–]\s*\d{1,2}\s*\+?\s*)?(?:years?|yrs?)'?(?:\s+of)?(?:\s+[\w-]+){0,3}?\s+(?:experience|exp)\b|"
+    r"\b(\d{1,2})\s*\+?\s*yoe\b|\byoe\s*[:=]?\s*(\d{1,2})\b", re.I)
+MIN_SENIOR_YEARS = 3  # asking for (or having) this many years of experience is not an intern or new-grad profile
+EARLY_LEVELS = ("intern", "new-grad")
+
+
+def _head(result: dict) -> str:
+    return f"{result.get('title', '')} {result.get('url', '')}".replace("-", " ").replace("_", " ")
+
+
+def experience_years(text: str) -> int:
+    """The most years of experience the text asks for or mentions (0 if none). '3-5 years' counts as 3."""
+    return max((int(next(g for g in m.groups() if g)) for m in YEARS_RE.finditer(text or "")), default=0)
+
+
 def explicit_level(result: dict) -> str | None:
-    """The level a title/URL states outright: intern / new-grad markers (as in classify_level) or senior markers
-    (senior, staff, lead, manager, "Engineer II"...). None when it says nothing (classify_level would guess 'experienced')."""
+    """The level a title/URL states outright: senior or PhD markers (they win over "Graduate"), intern / new-grad markers
+    (as in classify_level) or other senior words (lead, manager...). None when it says nothing (classify_level would guess
+    'experienced')."""
+    text = _head(result)
+    if SENIOR_TITLE_RE.search(text) or PHD_RE.search(text):
+        return "experienced"
     level = classify_level(result)
     if level != "experienced":
         return level
-    text = f"{result.get('title', '')} {result.get('url', '')}".replace("-", " ").replace("_", " ")
-    return "experienced" if SENIOR_RE.search(text) else None
+    return "experienced" if SENIOR_RE.search(text) or LEVEL_CODE_RE.search(text) else None
+
+
+def posting_level_conflict(result: dict, level: str, text: str | None = None) -> str | None:
+    """Why a posting is for another level than an intern / new-grad candidate's (None = no conflict): its title or URL says
+    PhD, senior, staff, principal, II/III or a level code, or its text (snippet, or `text` once fetched) asks for
+    MIN_SENIOR_YEARS+ years of experience. A body that merely mentions a PhD ("BS, MS or PhD") is fine."""
+    if level not in EARLY_LEVELS:
+        return None
+    head = _head(result)
+    if m := (SENIOR_TITLE_RE.search(head) or PHD_RE.search(head)
+             or (classify_level(result) not in EARLY_LEVELS and LEVEL_CODE_RE.search(head))):
+        return f"title says {m.group(0).strip()!r}"
+    years = experience_years(text if text is not None else result.get("content") or "")
+    return f"asks for {years}+ years of experience" if years >= MIN_SENIOR_YEARS else None
+
+
+def title_level(result: dict) -> str | None:
+    """The candidate level an interview page's title/URL names: 'experienced' for L4/L5/SSE/SDE2/SWE II/Senior/Staff...,
+    'intern' / 'new-grad' for their markers, None when it says nothing."""
+    if SENIOR_TITLE_RE.search(_head(result)):
+        return "experienced"
+    level = classify_level(result)
+    if level in EARLY_LEVELS:
+        return level
+    return "experienced" if LEVEL_CODE_RE.search(_head(result)) else None
+
+
+INTERN_NEW_GRAD_RE = re.compile(r"\bintern(?:ship)?s?\b|new[ -]?grad|university[ -]grad|entry[ -]level|campus hire|fresher", re.I)
+
+
+def text_level(text: str) -> str | None:
+    """'experienced' when a first-person post's text gives the writer's seniority away (a level code like L5A or SDE2, or
+    MIN_SENIOR_YEARS+ years of experience) and never mentions interns or new grads; otherwise None. Only for forum/blog
+    posts: guides advertise their coaches' "10+ years of experience"."""
+    if not text or INTERN_NEW_GRAD_RE.search(text):
+        return None
+    codes = re.search(r"\b(?:l[4-9]a?|e[4-9]|ic[3-9]|sse|(?:sde|swe)[\s_-]*(?:ii|iii|[2-3]))\b", text, re.I)
+    return "experienced" if codes or experience_years(text) >= MIN_SENIOR_YEARS else None
+
+
+def interview_level(result: dict, text: str | None = None) -> str | None:
+    """The level an interview source describes: its title/URL first, then (forum/blog posts only) its text."""
+    if level := title_level(result):
+        return level
+    if source_kind(result.get("url", ""), "") in ("forum", "blog"):
+        return text_level(text if text is not None else result.get("content") or "")
+    return None
 
 
 def posting_location_class(result: dict, location: str | None) -> str:
@@ -606,9 +705,11 @@ def posting_location_class(result: dict, location: str | None) -> str:
 
 def rank_postings(results: list[dict], company: str, role: str, level: str, location: str | None = None) -> list[dict]:
     """Keep only the company's own postings at the requested level, best first. With a location: postings in it come
-    first, unknown ones next, and postings from another country are dropped whenever one in the location exists."""
+    first, unknown ones next, and postings from another country are dropped whenever one in the location exists.
+    An intern / new-grad posting whose title or snippet signals another level (PhD, Senior, II, "5+ years") is dropped."""
     candidates = [{**r, "location_class": posting_location_class(r, location)} for r in results
-                  if classify_level(r) == level and not looks_like_job_list(r["url"], r["title"]) and posting_belongs_to(r, company)]
+                  if classify_level(r) == level and not posting_level_conflict(r, level)
+                  and not looks_like_job_list(r["url"], r["title"]) and posting_belongs_to(r, company)]
     if location and any(c["location_class"] == MATCH for c in candidates):
         candidates = [c for c in candidates if c["location_class"] != OTHER]
     role_words = [w for w in re.findall(r"[a-z]+", role.lower()) if len(w) > 2]
@@ -660,13 +761,16 @@ def normalize_posting_url(url: str) -> str:
     return url
 
 
-def resolve_posting(candidates: list[dict], location: str | None = None, focus: list[str] | None = None) -> list[dict]:
+def resolve_posting(candidates: list[dict], location: str | None = None, focus: list[str] | None = None,
+                    level: str | None = None) -> list[dict]:
     """Return one posting with full text. Try the best candidates in order; fall back to the best snippet.
 
     With a location, a fetched page that really is in it wins immediately; otherwise the next candidate is
-    tried, and a page in another country is used only if nothing better was found.
+    tried, and a page in another country is used only if nothing better was found. With a level, a page whose text asks
+    for another level's experience ("5+ years") is skipped.
     """
     found: list[tuple[int, int, dict]] = []  # (location rank, order, posting)
+    wrong_level: set[str] = set()  # never fall back to the snippet of a posting skipped for its level
     for order, cand in enumerate(candidates[:MAX_POSTING_TRIES]):
         url = normalize_posting_url(cand["url"])
         text = _fit(extract([url]).get(url, ""), focus)
@@ -675,6 +779,10 @@ def resolve_posting(candidates: list[dict], location: str | None = None, focus: 
             continue
         if looks_like_job_list(url, cand.get("title", ""), text):
             print(f"[search] {url} lists many jobs instead of describing one; skipping it", file=sys.stderr)
+            continue
+        if level and (conflict := posting_level_conflict(cand, level, text)):
+            print(f"[search] posting {url} is not a {level} posting ({conflict}); skipping it", file=sys.stderr)
+            wrong_level.add(cand["url"])
             continue
         if req := required_location_elsewhere(text, location):
             print(f"[search] posting {url} requires a location outside {location} (\"{req}\"); skipping it", file=sys.stderr)
@@ -687,9 +795,12 @@ def resolve_posting(candidates: list[dict], location: str | None = None, focus: 
         found.append((RANK[cls], order, posting))
     if found:
         return [min(found, key=lambda t: t[:2])[2]]
+    rest = [c for c in candidates if c["url"] not in wrong_level]
+    if rest:
+        print(f"[search] no posting page could be extracted; using the snippet of {rest[0]['url']}", file=sys.stderr)
+        return rest[:1]
     if candidates:
-        print(f"[search] no posting page could be extracted; using the snippet of {candidates[0]['url']}", file=sys.stderr)
-        return candidates[:1]
+        print(f"[search] no {level} posting found (every candidate was for another level)", file=sys.stderr)
     return []
 
 
@@ -730,6 +841,7 @@ def search_company_careers(company: str, role: str, level: str, sites: list[str]
     return [r for r in search(query, include_domains=sites)
             if source_kind(r["url"], company) == "company"
             and classify_level(r) in (level, "experienced")  # titles can only say "intern"/"new grad"; unmarked pass
+            and not (level in EARLY_LEVELS and (SENIOR_TITLE_RE.search(_head(r)) or PHD_RE.search(_head(r))))
             and (CAREERS_PATH_RE.search(urlparse(r["url"]).path) or JOB_PATH_RE.search(r["url"])
                  or re.search(r"(?:^|\.)(?:careers?|jobs)\.", _host(r["url"])) or _host(r["url"]).endswith(".jobs"))]
 
@@ -755,7 +867,7 @@ def gather_research(company: str, role: str, level: str, jd: str | None, today: 
     careers_results += search_company_careers(company, role, level, company_sites([r["url"] for r in company_results], company))
     forum_results = [r for q in forum_queries(company, role, level) for r in search(q)]
     other_results = search(f"{company} {role} {terms} {family_terms} interview process common questions", exclude_domains=EXCLUDE_DOMAINS)
-    interview_kept, interview_filtered, forum = interview_search(forum_results, other_results, company, role)
+    interview_kept, interview_filtered, forum = interview_search(forum_results, other_results, company, role, level)
     research = {
         "careers": _dedupe(careers_results),  # first, so a page found twice is filed here, not under company news
         # pages whose title names the company first (stable): only the top FULL_TEXT_COMPANY are fetched, and a story that
@@ -769,7 +881,7 @@ def gather_research(company: str, role: str, level: str, jd: str | None, today: 
     if not jd:
         postings = search(f"{company} {role} {terms} job posting {location}", max_results=POSTING_RESULTS)
         research["posting"] = resolve_posting(rank_postings(postings, company, role, level, location), location,
-                                              focus_keywords(company, role, level))
+                                              focus_keywords(company, role, level), level)
     return research
 
 
@@ -786,7 +898,7 @@ def search_more(company: str, role: str, level: str, section: str, known_urls: s
         forum_results = [r for q in forum_queries(company, role, level, retry=True) for r in search(q)]
         other_results = search(f"{company} {role} {terms} {interview_terms(role)} interview questions what to expect",
                                exclude_domains=EXCLUDE_DOMAINS)
-        results, filtered, forum = interview_search(forum_results, other_results, company, role)
+        results, filtered, forum = interview_search(forum_results, other_results, company, role, level)
         if forum_out is not None:
             forum_out.update(forum)
         if filtered_out is not None:

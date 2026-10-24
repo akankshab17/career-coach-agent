@@ -522,14 +522,15 @@ def test_a_failed_case_is_recorded_and_flagged_not_fatal(env, monkeypatch):
 
 # ---- the files themselves ----
 
-def test_cases_yaml_has_the_five_cases():
+def test_cases_yaml_has_the_six_cases():
     cases = harness.load_cases(ROOT / "evals" / "cases.yaml")
     assert [c.name for c in cases] == ["google-intern", "cummins-swe-new-grad", "perplexity-ai-engineer-new-grad", "salesforce-apm-new-grad",
-                                       "amazon-sde-new-grad"]
+                                       "amazon-sde-new-grad", "uber-swe-new-grad"]
     assert (by := {c.name: c for c in cases})["amazon-sde-new-grad"].role == "Software Developer"
     by = {c.name: c for c in cases}
     assert (by["google-intern"].company, by["google-intern"].level) == ("Google", "intern")
     assert by["salesforce-apm-new-grad"].role == "Associate Product Manager" and by["perplexity-ai-engineer-new-grad"].role == "AI Engineer"
+    assert (by["uber-swe-new-grad"].company, by["uber-swe-new-grad"].level) == ("Uber", "new-grad")
     assert all(c.location == "United States" for c in cases)
 
 

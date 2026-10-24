@@ -766,7 +766,7 @@ def test_each_step_logs_its_credits_and_the_pipeline_line_has_the_total(monkeypa
         search._charge({"usage": {"credits": 9}}, 0)
         return {"company": [res(1, url="https://news.example.com/a")], "posting": [], "filtered": []}
 
-    def fetch(sources, focus=None, company="", location=None):
+    def fetch(sources, focus=None, company="", location=None, level=None):
         search._charge({}, 2)  # no usage reported: the estimate counts
         return 0, 0
 

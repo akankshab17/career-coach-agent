@@ -29,3 +29,9 @@ cases:
     role: Software Developer
     level: new-grad
     location: United States
+
+  - name: uber-swe-new-grad
+    company: Uber
+    role: Software Engineer
+    level: new-grad
+    location: United States

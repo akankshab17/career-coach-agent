@@ -189,7 +189,7 @@ class RunStats:
             lines += [f"- [{f['reason']}] {f['title']} — {f['url']}" for f in self.filtered] + [""]
         if self.general_sections:
             lines += [f"# General guidance used ({len(self.general_sections)})", "",
-                      "No interview or role facts reached the writer, so these sections hold code-written general guidance "
+                      "These sections had no grounded facts (no role text at the candidate's level, or no interview/role facts at all), so they hold code-written general guidance "
                       "for the role family (labelled in the brief):", ""]
             lines += [f"- {s}" for s in self.general_sections] + [""]
         if self.excluded:
@@ -542,7 +542,13 @@ def split_sentences(text: str) -> list[str]:
 LINE_PREFIX_RE = re.compile(r"^(\s*(?:[*\-]|\d+\.)\s+)?(.*)$", re.S)
 NUMBERED_RE = re.compile(r"^(\s*)\d+\.(\s+)")
 REPORTED_RE = re.compile(r"\(reported [^)]*\)", re.I)
-ATTRIBUTED_RE = re.compile(r"\bcandidates?\b[^.]{0,30}\b(report|said|say|mention|describe|share|recall)|reported by candidates", re.I)
+ATTRIBUTED_RE = re.compile(r"\bcandidates?\b[^.]{0,30}\b(report|said|say|mention|describe|share|recall)|reported by candidates|"
+                           r"^\W*(?:candidates?|applicants?|interviewees?)\b", re.I)  # "Candidates typically hear back..."
+# The writer's own labels, left in front of a sentence: "**Key Topics:** ...", "Standout insight: ...", "2) FORMAT - ...".
+LABEL_PREFIX_RE = re.compile(
+    r"^\s*(?:\d[.)]\s*)?(?:\*\*|__)?\s*(?:key topics?|topics?|format|structure|standout insights?|key insights?|insights?|"
+    r"key takeaways?|takeaways?|tips?|notes?|facts?|summary)\s*(?:\*\*|__)?(?:\s*[:：]|\s+[–—-])\s*(?:\*\*|__)?\s*(?=\S)", re.I)
+REPEATED_ATTRIBUTION_RE = re.compile(r"^(Candidates report(?: that|:)\s+)(?:(?:Candidates report(?: that|:)|Reportedly,)\s+)+", re.I)
 STAGE_LABEL_LINE_RE = re.compile(r"^\*\*[^*]+\*\*:?$")  # a bold stage label like "**Phone screen**"
 LOGISTICS_RE = re.compile(r"\b(interviews?|rounds?|schedul\w*|timeline|next steps?|hear back|screens?|assessments?|onsite|on-site|how long)\b", re.I)
 
@@ -562,12 +568,31 @@ def add_level_label(sentence: str, label: str) -> str:
     return f"{body} ({label}){p1}{cites}{p2}"
 
 
+def strip_label(sentence: str) -> str:
+    """'**Key Topics:** The OA has two problems [F2].' -> 'The OA has two problems [F2].'"""
+    m = LABEL_PREFIX_RE.match(sentence)
+    if not m:
+        return sentence
+    rest = sentence[m.end():]
+    return rest[:1].upper() + rest[1:]
+
+
+def clean_attribution(sentence: str) -> str:
+    """'Candidates report: Candidates report that ...' -> 'Candidates report: ...' (one label, not two)."""
+    m = REPEATED_ATTRIBUTION_RE.match(sentence)
+    if not m:
+        return sentence
+    rest = sentence[m.end():]
+    return m.group(1) + (rest[:1].upper() + rest[1:] if m.group(1).rstrip().endswith(":") else rest)
+
+
 def attribute_to_candidates(sentence: str) -> str:
     """Rewrite an unattributed forum sentence to start with 'Candidates report'. Keeps proper nouns intact."""
+    sentence = re.sub(r"^Reportedly,\s+", "", sentence)  # "Candidates report" already says it is unconfirmed
     head, _, rest = sentence.partition(" ")
     if head in LOWERABLE_STARTERS and rest:
         return f"Candidates report that {head.lower()} {rest}"
-    return f"Candidates report: {sentence}"
+    return f"Candidates report: {sentence[:1].upper()}{sentence[1:]}"
 
 
 def _is_exempt(sentence: str) -> bool:
@@ -666,11 +691,13 @@ def check_body(body: str, facts: list[dict], stats: RunStats, sources: dict | No
                     stats.drops.append(Drop(section, sent, "company-section-cap"))
                     return
                 company_sentences += 1
-            if any(by_id[i].get("hedged") for i in valid) and not HEDGE_WORD_RE.search(claim):
+            from_candidates = not derived and all(by_id[i].get("is_experience") for i in valid)
+            if any(by_id[i].get("hedged") for i in valid) and not HEDGE_WORD_RE.search(claim) and not (
+                    from_candidates or ATTRIBUTED_RE.search(sent)):  # "Candidates report" is its own hedge: no "Reportedly, Candidates..."
                 new = add_hedge(sent)
                 stats.rewrites.append(Rewrite(section, sent, new, "hedge-added"))
                 sent = new
-            if not derived and all(by_id[i].get("is_experience") for i in valid) and not ATTRIBUTED_RE.search(sent):
+            if from_candidates and not ATTRIBUTED_RE.search(sent):
                 new = attribute_to_candidates(sent)
                 stats.rewrites.append(Rewrite(section, sent, new, "candidates-report"))
                 sent = new
@@ -689,10 +716,11 @@ def check_body(body: str, facts: list[dict], stats: RunStats, sources: dict | No
                     new = add_level_label(sent, label)
                     stats.rewrites.append(Rewrite(section, sent, new, "source-label"))
                     sent = new
-            kept.append(sent)
+            kept.append(clean_attribution(sent))
 
         for sent in line["sents"]:
             stats.checked += 1
+            sent = strip_label(sent)
             valid = [i for i in CITE_RE.findall(sent) if i in by_id]
             stages = {by_id[i]["stage"] for i in valid if by_id[i]["section"] == "interview" and by_id[i]["stage"] != "unknown"}
             if len(stages) > 1 and not derived:  # facts from different interview stages must not share a sentence
@@ -786,6 +814,8 @@ def ensure_sections(body: str, s3_heading: str, n_interview_facts: int, n_interv
 
 
 GENERAL_SECTIONS = {"prep": "## 4. How to prepare", "questions": "## 5. Questions to ask the interviewer"}
+# Section 3 (either heading), with the "No official posting text found." note if any, then nothing but the placeholder.
+EMPTY_ROLE_RE = re.compile(rf"(?m)^(## 3\.[^\n]*\n(?:No official posting text found[^\n]*\n)?){re.escape(PLACEHOLDER)}$")
 
 
 def general_note(role: str) -> str:
@@ -793,18 +823,24 @@ def general_note(role: str) -> str:
 
 
 def add_general_guidance(body: str, role: str, facts: list[dict], stats: RunStats) -> str:
-    """When the writer had no interview or role facts (only company facts), sections 4 and 5 end up as placeholders and the
-    brief has nothing to act on. Fill those placeholders with general guidance for the role family, labelled as such
-    (code-written, uncited, never presented as company data), and say so in the TL;DR. Runs after check_body, so the
-    guidance is not checked for citations."""
+    """Fill empty sections with code-written general guidance for the role family, labelled as such (uncited, never
+    presented as company data). Runs after check_body, so the guidance is not checked for citations.
+    - Section 3 empty and no role facts (no posting at the candidate's level, no other role text): what such roles need.
+    - No interview or role facts at all (only company facts): sections 4 and 5 too, and the TL;DR says so."""
+    m = EMPTY_ROLE_RE.search(body)
+    if m and not any(f["section"] == "role" and not f.get("pinned") for f in facts):
+        body = body[:m.start()] + m.group(1) + guidance.section_text("role", role) + body[m.end():]
+        stats.general_sections.append(m.group(1).splitlines()[0].removeprefix("## "))
     if any(f["section"] in KEY_SECTIONS and not f.get("pinned") for f in facts):
         return body
+    filled = []
     for kind, heading in GENERAL_SECTIONS.items():
         empty = re.compile(rf"(?m)^{re.escape(heading)}\n{re.escape(PLACEHOLDER)}$")
         if empty.search(body):
             body = empty.sub(lambda _: f"{heading}\n{guidance.section_text(kind, role)}", body)
             stats.general_sections.append(heading.removeprefix("## "))
-    if stats.general_sections:
+            filled.append(kind)
+    if filled:
         body = re.sub(r"(?ms)^(## TL;DR\n.*?)(\n\n## 1\.)", lambda m: f"{m.group(1)}\n- {general_note(role)}{m.group(2)}", body, count=1)
     return body
 

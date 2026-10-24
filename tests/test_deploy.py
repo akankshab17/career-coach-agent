@@ -202,3 +202,9 @@ def test_the_image_runs_as_uid_1000_and_can_write_its_cache():
     assert out.startswith("1000 ") and "jobs.db" in out and "extract-probe" in out
     refused = subprocess.run(["docker", "run", "--rm", tag], capture_output=True, text=True, timeout=120)
     assert refused.returncode != 0 and "APP_ACCESS_CODE" in refused.stdout + refused.stderr
+
+
+def test_the_streamlit_toolbar_hides_deploy_and_developer_menu():
+    config = (ROOT / ".streamlit" / "config.toml").read_text()
+    assert 'toolbarMode = "viewer"' in config
+    assert "COPY --chown=user .streamlit/ .streamlit/" in (ROOT / "Dockerfile").read_text()  # the image needs it too

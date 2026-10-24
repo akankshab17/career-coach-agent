@@ -26,6 +26,7 @@ RUN pip install -r requirements.txt
 
 COPY --chown=user src/ src/
 COPY --chown=user app.py start.sh ./
+COPY --chown=user .streamlit/ .streamlit/
 RUN chmod +x start.sh
 
 USER user

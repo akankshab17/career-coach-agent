@@ -60,6 +60,51 @@ PREP = {
     ],
 }
 
+ROLE = {  # section 3 when no posting at the candidate's level (or other role text) was found
+    "software": [
+        "Fluency in at least one mainstream programming language, with data structures and algorithms fundamentals.",
+        "Writing readable, tested code and working with version control and code review.",
+        "Reading and debugging code you did not write.",
+        "Explaining technical trade-offs clearly and working well with a team.",
+    ],
+    "product": [
+        "Understanding users and turning their problems into a prioritised plan.",
+        "Working closely with engineering and design to ship features.",
+        "Using data and metrics to make and explain decisions.",
+        "Clear written and spoken communication with many different teams.",
+    ],
+    "data": [
+        "SQL and at least one analysis language such as Python or R.",
+        "Statistics fundamentals, including experiment design.",
+        "Turning an open question into an analysis and communicating the result.",
+    ],
+    "hardware": [
+        "Fundamentals of the circuits or systems the team builds, and the lab tools used to test them.",
+        "Methodical debugging and careful documentation of results.",
+        "Working with other engineering disciplines across a product cycle.",
+    ],
+    "design": [
+        "A portfolio that shows your process, not just final screens.",
+        "User research and turning feedback into design changes.",
+        "Working with product managers and engineers through to launch.",
+    ],
+    "security": [
+        "Core security concepts: authentication, common vulnerabilities, networking, cryptography basics.",
+        "Threat modelling and explaining risk to non-specialists.",
+        "Scripting or programming to automate checks and analysis.",
+    ],
+    "business": [
+        "Structured problem solving and clear communication with customers and colleagues.",
+        "Comfort with numbers: building and explaining a simple model or forecast.",
+        "Knowing the company's products and customers.",
+    ],
+    None: [
+        "The skills listed on similar postings for this role, matched to examples from your background.",
+        "Clear communication and working well with a team.",
+        "Learning quickly in a new domain.",
+    ],
+}
+
 QUESTIONS = {
     "software": [
         "What does someone joining at my level typically work on in their first few months?",
@@ -109,8 +154,12 @@ def family_name(role: str) -> str:
     return f"{FAMILY_NAME[family]} roles" if family else "roles like this one"
 
 
+TEXTS = {"role": ROLE, "prep": PREP, "questions": QUESTIONS}
+
+
 def section_text(kind: str, role: str) -> str:
-    """The body of section 4 ('prep') or 5 ('questions'): the label line, then bullets."""
+    """The body of section 3 ('role'), 4 ('prep') or 5 ('questions'): the label line, then bullets."""
     family = role_family(role)
-    items = (PREP if kind == "prep" else QUESTIONS).get(family) or (PREP if kind == "prep" else QUESTIONS)[None]
-    return f"**{LABEL}**, typical for {family_name(role)}:\n" + "\n".join(f"- {i}" for i in items)
+    items = TEXTS[kind].get(family) or TEXTS[kind][None]
+    lead = f"what {family_name(role)} typically need" if kind == "role" else f"typical for {family_name(role)}"
+    return f"**{LABEL}**, {lead}:\n" + "\n".join(f"- {i}" for i in items)

@@ -225,6 +225,18 @@ def posting_level(src: dict) -> str | None:
     return explicit_level(src)
 
 
+def source_level(src: dict) -> str | None:
+    """The candidate level a third-party interview source describes, inferred from the page itself rather than the
+    extractor's label: its title/URL (L5A, SSE, SDE2, "SWE II", Senior, intern, new grad...) and, for forum/blog posts, its
+    text (3+ years of experience, a level code). None for the company's own pages (they often cover several programs:
+    the extractor's per-fact level stays) or when nothing says."""
+    from search import interview_level
+
+    if src.get("kind") in ("company", "jd"):
+        return None
+    return interview_level(src, source_text(src)[0])
+
+
 def ground(candidates: list[dict], sources: dict, already: list[dict] | None = None, company: str | None = None) -> tuple[list[dict], list[dict]]:
     """Keep candidates whose quote is really in their source. Returns (grounded, rejected).
 
@@ -277,6 +289,8 @@ def ground(candidates: list[dict], sources: dict, already: list[dict] | None = N
             level = c.get("level") if c.get("level") in LEVELS else "unknown"
             if section == "role" and (posted := posting_level(src)):  # a posting's title/URL says its level outright
                 level = posted
+            if section == "interview" and (hint := source_level(src)) and (hint == "experienced" or level == "unknown"):
+                level = hint  # an L5 candidate's post is L5 evidence, whatever the extractor said: down-ranked and labelled
             grounded.append({
                 "fact": fact,
                 "exact_quote": quote.strip(),

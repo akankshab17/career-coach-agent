@@ -24,7 +24,7 @@ from brief import (
 )
 from facts import extract_facts, ground, is_official_posting, location_fact, source_text
 from location import DEFAULT_LOCATION
-from search import credits_used, fetch_full_text, focus_map, format_credits, gather_research, search_more
+from search import credits_used, display_company, fetch_full_text, focus_map, format_credits, gather_research, search_more
 
 MIN_FACTS = 2  # a key section with fewer grounded facts triggers one follow-up search
 CONCURRENCY_ENV = "EXTRACT_CONCURRENCY"
@@ -118,7 +118,7 @@ def fetch_node(state: BriefState) -> dict:
     stats, sources = state["stats"], state["sources"]
     before = credits_used()
     fetched, failed = fetch_full_text(sources, focus=focus_map(state["company"], state["role"], state["level"]),
-                                      company=state["company"], location=state["location"])
+                                      company=state["company"], location=state["location"], level=state["level"])
     known = {e["url"] for e in stats.excluded}
     new = [{"url": s["url"], "title": s.get("title", ""), "reason": s["excluded"]} for s in sources.values()
            if s.get("excluded") and s["url"] not in known]
@@ -126,7 +126,7 @@ def fetch_node(state: BriefState) -> dict:
     stats.sources_with_text = sum(1 for s in sources.values() if s.get("full_text"))
     _log(stats, f"[fetch] {fetched} pages fetched, {failed} failed; {stats.sources_with_text}/{len(sources)} sources have full text"
                 + _charged(stats, before)
-                + (f"; excluded {len(new)} posting(s) that require a location outside {state['location']}" if new else ""))
+                + (f"; excluded {len(new)} posting(s) (another country or another level)" if new else ""))
     return {"sources": sources}
 
 
@@ -342,7 +342,7 @@ def run_pipeline(company: str, role: str, level: str, jd: str | None, use_cache:
     """Run the graph. Pass `stats` to keep the run log even when the run stops early with an LLMError, and set
     `stats.on_progress` to hear about each step as it starts and each log line as it is written."""
     final = build_graph().invoke({
-        "company": company, "role": role, "level": level, "jd": jd,
+        "company": display_company(company), "role": role, "level": level, "jd": jd,
         "today": today or date.today(), "use_cache": use_cache, "stats": stats or RunStats(), "location": location,
     })
     _log(final["stats"], final["stats"].pipeline_line())

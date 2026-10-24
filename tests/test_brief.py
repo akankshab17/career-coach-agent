@@ -129,8 +129,10 @@ def test_full_brief_output_has_all_six_headings_even_when_writer_stops_early():
     text = brief.finalize_brief("Stripe", "SWE", "new-grad", truncated, FACTS, SOURCES, stats).text
     for h in HEADINGS[:3] + ["## 3. What the role really needs (Inferred, not from a JD)"] + HEADINGS[4:]:
         assert h + "\n" in text
-    assert text.count(brief.PLACEHOLDER) == 5  # sections 1-5: the cut-off "Stripe builds" is uncited -> dropped
-    assert "No official posting text found.\n" + brief.PLACEHOLDER in text  # SOURCES here has no official posting
+    # sections 1, 2, 4, 5: the cut-off "Stripe builds" is uncited -> dropped; section 3 (no role facts) gets general guidance
+    assert text.count(brief.PLACEHOLDER) == 4
+    assert "**General guidance (no company-specific data found)**, what software engineering roles typically need:" in text
+    assert "No official posting text found.\n**General guidance" in text  # SOURCES here has no official posting
 
 
 def test_tldr_interview_claims_need_interview_facts():
@@ -759,16 +761,35 @@ def test_company_only_briefs_get_labelled_general_guidance_for_the_role_family()
     assert tldr.splitlines() == ["- Limited interview data (0 sources).", "- No interview reports found.",
                                  "- Only company information was found; sections 4 and 5 give general guidance for product management roles."]
     assert brief.PLACEHOLDER not in tldr
-    assert "No grounded information found for this section." in text.split("## 2.")[1].split("## 3.")[0]  # 2 and 3 stay honest
-    assert stats.general_sections == ["4. How to prepare", "5. Questions to ask the interviewer"]
-    assert "# General guidance used (2)" in stats.debug_report()
+    assert "No grounded information found for this section." in text.split("## 2.")[1].split("## 3.")[0]  # 2 stays honest
+    role = text.split("## 3.")[1].split("\n\n## 4.")[0]
+    assert "No official posting text found.\n**General guidance (no company-specific data found)**, what product management roles" in role
+    assert stats.general_sections == ["3. What the role really needs (Inferred, not from a JD)", "4. How to prepare",
+                                      "5. Questions to ask the interviewer"]
+    assert "# General guidance used (3)" in stats.debug_report()
 
 
 def test_general_guidance_is_not_used_when_interview_or_role_facts_exist():
+    """Interview facts but no role facts: only section 3 (nothing to say about the role) gets general guidance."""
     stats = RunStats()
     text = brief.finalize_brief("Stripe", "Software Engineer", "new-grad", COMPANY_ONLY_DRAFT, FACTS, SOURCES, stats).text
-    assert "General guidance" not in text and stats.general_sections == []
+    assert stats.general_sections == ["3. What the role really needs (Inferred, not from a JD)"]
     assert "## 4. How to prepare\nNo grounded information found for this section." in text
+    assert "sections 4 and 5 give general guidance" not in text
+    with_role = FACTS + [fact("Requires Python.", "experience with Python", "role", "S1")]
+    stats = RunStats()
+    text = brief.finalize_brief("Stripe", "Software Engineer", "new-grad", COMPANY_ONLY_DRAFT, with_role, SOURCES, stats).text
+    assert "General guidance" not in text and stats.general_sections == []
+
+
+def test_no_posting_at_the_level_means_general_role_guidance_in_section_3():
+    """Uber new grad: the only posting was a PhD / Engineer II one, so it was rejected and section 3 had nothing."""
+    stats = RunStats()
+    draft = "## TL;DR\n- The loop has 4 rounds [F2].\n## 3. What the role really needs\nNo grounded information found for this section."
+    text = brief.finalize_brief("Uber", "Software Engineer", "new-grad", draft, FACTS, SOURCES, stats).text
+    role = text.split("## 3.")[1].split("\n\n## 4.")[0]
+    assert "General guidance (no company-specific data found)" in role and brief.PLACEHOLDER not in role
+    assert "[" not in role.split("\n", 1)[1]  # code-written: no citations
 
 
 def test_a_role_with_no_known_family_gets_generic_guidance():
@@ -824,3 +845,29 @@ def test_a_label_written_after_the_full_stop_keeps_its_sentence_cited():
     assert "- Stripe was valued highly (reported Feb 2026) [F4]." in out
     assert "1. Practice string parsing (based on reported questions) [F3]." in out
     assert brief.normalize_citations("Mid-sentence (aside) text [F1]. Next.", 1) == "Mid-sentence (aside) text [F1]. Next."
+
+
+# ---- leftover labels (Uber new grad) ----
+
+@pytest.mark.parametrize("written,clean", [
+    ("**Key Topics:** String parsing questions are common [F3].", "String parsing questions are common [F3]."),
+    ("Standout insight: Stripe builds payments infrastructure [F1].", "Stripe builds payments infrastructure [F1]."),
+    ("**Format**: the loop has 4 rounds [F2].", "The loop has 4 rounds [F2]."),
+    ("2) FORMAT - The loop has 4 rounds [F2].", "The loop has 4 rounds [F2]."),
+    ("Fact-checking is not a label [F1].", "Fact-checking is not a label [F1]."),
+])
+def test_writer_label_prefixes_are_stripped(written, clean):
+    assert brief.strip_label(written) == clean
+
+
+def test_no_double_candidate_labels():
+    hedged = [{**FACTS[1], "hedged": True}]
+    out = brief.check_body("## TL;DR\n- **Key Topics:** Candidates typically get 4 rounds [F1].\n"
+                           "- Candidates report that the loop has 4 rounds [F1].\n- The loop has 4 rounds [F1].", hedged, RunStats())
+    tldr = out.split("## 1.")[0]
+    assert "- Candidates typically get 4 rounds [F1]." in tldr  # already attributed: no "Candidates report: Candidates ..."
+    # the writer's attributed line gets no "Reportedly, Candidates report that ..."; the plain one is attributed once, no hedge on top
+    assert tldr.count("- Candidates report that the loop has 4 rounds [F1].") == 2
+    assert "Reportedly" not in tldr and "Key Topics" not in tldr and "Candidates report: Candidates" not in tldr
+    assert brief.clean_attribution("Candidates report: Candidates report that x is y [F1].") == "Candidates report: X is y [F1]."
+    assert brief.attribute_to_candidates("Reportedly, Leetcode questions came up [F1].") == "Candidates report: Leetcode questions came up [F1]."

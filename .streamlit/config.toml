@@ -1,0 +1,4 @@
+# Streamlit settings for the web app (read from the working directory, so the Docker image copies this folder).
+[client]
+# "viewer" hides the Deploy button and the developer options in the top-right menu.
+toolbarMode = "viewer"
