@@ -1,26 +1,30 @@
 {
  "cases": {
   "google-intern": {
-   "sources": 30,
-   "full_text": 14,
-   "facts_company": 35,
-   "facts_interview": 29,
-   "facts_role": 46,
-   "facts_timeline": 16,
-   "grounded": 126,
+   "sources": 28,
+   "full_text": 11,
+   "facts_company": 14,
+   "facts_interview": 40,
+   "facts_role": 15,
+   "facts_timeline": 8,
+   "grounded": 77,
    "rejected": 9,
-   "dropped": 1,
-   "rewrites": 7,
+   "dropped": 3,
+   "rewrites": 0,
    "empty_sections": 0,
    "general_sections": 0,
    "fixture_misses": 0,
-   "latency_s": 8.6,
-   "tokens_in": 2964,
-   "tokens_out": 3763,
-   "tokens_reasoning": 2715,
-   "cache_hits": 22,
-   "cache_misses": 0,
+   "latency_s": 86.8,
+   "tokens_in": 19035,
+   "tokens_out": 7150,
+   "tokens_reasoning": 2714,
+   "tavily_credits": 11.0,
+   "cache_hits": 9,
+   "cache_misses": 11,
    "llm": {
+    "extract": [
+     "groq/openai/gpt-oss-20b"
+    ],
     "write": [
      "groq/openai/gpt-oss-120b"
     ]
@@ -170,11 +174,11 @@
    }
   }
  },
- "pinned": "20261024-163159",
+ "pinned": "20261024-163928",
  "mode": "replay",
  "git": {
-  "commit": "fb00364",
-  "dirty": true
+  "commit": "2495954",
+  "dirty": false
  },
  "models": {
   "provider": "groq",

@@ -76,11 +76,11 @@ Every run also writes a debug report: per-source fact counts, every rejected fac
 | LLM cost per brief | $0 on Groq's free tier; $0.003 to $0.05 in the last recording, where most extraction ran on the OpenAI fallback |
 | Tavily credits per brief | about 9 to 17 (searches, page extracts, and the follow-up search when it runs) |
 
-Eval baseline (`evals/baseline.json`, pinned 2026-10-22, Uber added 2026-10-24, all Groq models):
+Eval baseline (`evals/baseline.json`, pinned 2026-10-22; Google re-recorded and Uber added 2026-10-24, all Groq models):
 
 | Case | Interview facts | Role facts | Company facts | Grounded | Rejected | Sentences dropped | Empty sections |
 |---|---|---|---|---|---|---|---|
-| Google, SWE intern | 29 | 46 | 35 | 126 | 9 | 1 | 0 |
+| Google, SWE intern | 40 | 15 | 14 | 77 | 9 | 3 | 0 |
 | Cummins, SWE new grad | 2 | 12 | 37 | 51 | 5 | 1 | 0 |
 | Perplexity, AI engineer new grad | 17 | 22 | 32 | 78 | 7 | 1 | 0 |
 | Salesforce, APM new grad | 10 | 8 | 11 | 30 | 3 | 1 | 0 |
