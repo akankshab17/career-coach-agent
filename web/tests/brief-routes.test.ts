@@ -77,3 +77,20 @@ describe("GET /api/briefs/:id/events", () => {
     expect((await events(request("/api/briefs/nope/events", { cookie }), ctx("nope"))).status).toBe(404);
   });
 });
+
+describe("events stream cancellation", () => {
+  it("stops polling and doesn't throw when the browser disconnects mid-poll", async () => {
+    const cookie = await loggedIn();
+    const fetchMock = fastapi([200, job({ step: "write" })]);
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const res = await events(request(`/api/briefs/${JOB_ID}/events`, { cookie }), ctx(JOB_ID));
+    const reader = res.body!.getReader();
+    await reader.read(); // retry line
+    const pending = reader.read(); // first poll starts
+    await reader.cancel();
+    await pending.catch(() => {});
+    await new Promise((r) => setTimeout(r, 20));
+    expect(errors).not.toHaveBeenCalled();
+    expect(fetchMock.mock.calls.length).toBeLessThanOrEqual(2);
+  });
+});

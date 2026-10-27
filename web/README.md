@@ -24,6 +24,8 @@ Company "Fail Co" shows the failed state; restarting it "expires" earlier briefs
 server after it sleeps; stopping it shows "waking up".
 
 ## Checks
+Stop `npm run dev` before `npm run build`: both write `.next/`, and a build under a running dev server left it
+reloading pages in a loop (fix: stop it, `rm -rf .next`, start again).
 ```
 npm test            # Vitest
 npm run typecheck   # tsc --noEmit

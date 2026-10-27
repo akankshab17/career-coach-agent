@@ -24,22 +24,32 @@ export async function GET(request: NextRequest, ctx: RouteContext<"/api/briefs/[
   });
   const encoder = new TextEncoder();
 
+  let closed = false; // the browser can cancel while a poll is in flight; never touch a closed controller
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
       controller.enqueue(encoder.encode("retry: 2000\n\n"));
     },
     async pull(controller) {
+      let chunk: string | null;
       try {
         const { value, done } = await events.next();
-        if (done) controller.close();
-        else controller.enqueue(encoder.encode(formatSse(value)));
+        chunk = done ? null : formatSse(value);
       } catch (err) {
         console.error("[events] stream failed", err);
-        controller.enqueue(encoder.encode(formatSse({ type: "fatal", detail: "The progress stream failed." })));
+        chunk = formatSse({ type: "fatal", detail: "The progress stream failed." });
+        if (!closed) controller.enqueue(encoder.encode(chunk));
+        chunk = null;
+      }
+      if (closed) return;
+      if (chunk === null) {
+        closed = true;
         controller.close();
+      } else {
+        controller.enqueue(encoder.encode(chunk));
       }
     },
     cancel() {
+      closed = true;
       abort.abort(); // the browser went away: stop polling FastAPI
     },
   });

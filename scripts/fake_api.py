@@ -47,10 +47,11 @@ def fake_brief(company: str, role: str, level: str) -> str:
         (f"{role} ({level}) careers page", f"https://{company.lower().replace(' ', '')}.example/careers/123"),
         (f"My {company} interview experience", "https://forum.example/posts/42"),
         (f"{company} new grad loop, rejected", "https://forum.example/posts/77"),
-        (f"{company} launches a new developer platform", "https://news.example/2026/10/launch"),
+        (f"{company} launches a new developer platform [video]", "https://news.example/2026/10/launch"),
     ]
     c = lambda n: f"[{n}]({s[n - 1][1]})"  # noqa: E731
-    sources = "\n".join(f"{i}. [{title}]({url})" for i, (title, url) in enumerate(s, 1))
+    esc = lambda t: t.replace("[", "\\[").replace("]", "\\]")  # noqa: E731  as brief.py escapes titles
+    sources = "\n".join(f"{i}. [{esc(title)}]({url})" + (" (2026-10-15)" if i == 5 else "") for i, (title, url) in enumerate(s, 1))
     return f"""# Interview brief: {company} — {role} ({level})
 
 ## TL;DR
@@ -62,11 +63,11 @@ def fake_brief(company: str, role: str, level: str) -> str:
 {company} builds software infrastructure for businesses. {c(1)}
 In October 2026 it launched a new developer platform. {c(5)}
 
-## 2. The interview process
+## 2. Interview process + common questions
 Candidates report: The online assessment has two LeetCode medium problems in 90 minutes. {c(3)}
 Candidates report: The final loop is four 45-minute interviews on one day. {c(4)}
 
-## 3. What the role involves
+## 3. What the role really needs
 The role involves building and operating backend services. {c(2)}
 The posting lists experience with **Python or Go** as a plus. {c(2)}
 
@@ -74,10 +75,10 @@ The posting lists experience with **Python or Go** as a plus. {c(2)}
 - Practice graph and interval problems under time pressure. {c(3)}
 - Prepare stories about debugging a production issue. {c(4)}
 
-## 5. Questions to ask
+## 5. Questions to ask the interviewer
 - How does the team decide what goes into the developer platform? {c(5)}
 
-## 6. Sources
+## Sources
 {sources}
 
 _Grounding: 38 facts grounded from 17 sources (23 rejected). Writing: 34 sentences checked, 1 dropped._
