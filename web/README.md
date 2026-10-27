@@ -27,3 +27,10 @@ npm run build
 |---|---|
 | `FASTAPI_URL` | Where FastAPI is (default `http://localhost:8000`) |
 | `INTERNAL_API_KEY` | Sent as `X-Internal-Key`; must match the API's value |
+| `APP_ACCESS_CODE` | The login code (required: login fails closed without it) |
+| `SESSION_SECRET` | 32+ chars; signs the httpOnly session cookie (`ib_session`, 7 days) |
+
+## Login
+`/login` posts the code to `/api/login`, which sets a signed session cookie. `proxy.ts` (Next 16's name for
+middleware) sends visitors without one to `/login` (pages) or answers 401 (`/api/*`); route handlers check again
+with `requireSession` (`lib/http.ts`). Open without login: `/login`, `/api/login`, `/api/health`.
