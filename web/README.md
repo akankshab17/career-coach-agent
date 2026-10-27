@@ -59,3 +59,12 @@ with `requireSession` (`lib/http.ts`). Open without login: `/login`, `/api/login
 Rate limits (`lib/ratelimit.ts`): 3 briefs per session per 10 min and 10 per IP per hour, counted only for valid
 requests. They live in each server instance's memory (best effort on Vercel); FastAPI's `MAX_BRIEFS_PER_DAY` is the
 real cap.
+
+## Pages
+- `/` the brief form (same zod schema as the server) and **Recent briefs** from this browser's localStorage
+  (`lib/history.ts`, key `ib_history_v1`, max 20, never the JD text). Statuses are refreshed from the server on each
+  visit (503s retried ~30s for cold starts); briefs the server no longer has show as **Expired** with
+  **Build again**, which opens the form prefilled from the query string.
+- `/briefs/:id` live progress (`components/Progress.tsx`: connecting, waking up, waiting in line, steps, failed,
+  expired), then the brief (`components/BriefView.tsx`): numbered citation chips jump to the Sources list,
+  external links open in a new tab, raw HTML is never rendered, **Download .md** gives the original markdown.

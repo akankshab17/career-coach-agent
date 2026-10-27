@@ -2,6 +2,8 @@
 
 import { useRouter } from "next/navigation";
 import { useState, type FormEvent } from "react";
+import { browserStorage, rememberJob, type Prefill } from "@/lib/history";
+import type { JobView } from "@/lib/jobs";
 import { BriefSchema, DEFAULT_LOCATION, LEVELS } from "@/lib/schema";
 
 // The brief request form. Validates with the same zod schema as the server (lib/schema.ts), then POSTs to
@@ -12,17 +14,19 @@ const JD_MAX = 20_000;
 
 type FieldErrors = Partial<Record<"company" | "role" | "level" | "location" | "jd", string>>;
 
-export function BriefForm() {
+/** `prefill` comes from a "Build again" link (lib/history.ts rebuildUrl), read by the page from the query string. */
+export function BriefForm({ prefill }: { prefill?: Prefill | null }) {
   const router = useRouter();
-  const [company, setCompany] = useState("");
-  const [role, setRole] = useState("");
-  const [level, setLevel] = useState<(typeof LEVELS)[number]>("new-grad");
-  const [location, setLocation] = useState(DEFAULT_LOCATION);
+  const [company, setCompany] = useState(prefill?.company ?? "");
+  const [role, setRole] = useState(prefill?.role ?? "");
+  const [level, setLevel] = useState<(typeof LEVELS)[number]>(prefill?.level ?? "new-grad");
+  const [location, setLocation] = useState(prefill?.location || DEFAULT_LOCATION);
   const [jd, setJd] = useState("");
   const [rerun, setRerun] = useState(false);
   const [errors, setErrors] = useState<FieldErrors>({});
   const [formError, setFormError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const hadJd = prefill?.hadJd ?? false;
 
   function clearError(field: keyof FieldErrors) {
     setErrors((prev) => (prev[field] ? { ...prev, [field]: undefined } : prev));
@@ -51,6 +55,7 @@ export function BriefForm() {
       });
       const body = (await res.json().catch(() => null)) as { job_id?: string; detail?: string } | null;
       if (res.status === 202 && body?.job_id) {
+        rememberJob(browserStorage(), body as JobView);
         router.push(`/briefs/${body.job_id}`);
         return;
       }
@@ -97,7 +102,7 @@ export function BriefForm() {
         </Field>
       </div>
 
-      <details className="group rounded-lg border border-zinc-200 dark:border-zinc-800" open={jd.length > 0 || undefined}>
+      <details className="group rounded-lg border border-zinc-200 dark:border-zinc-800" open={jd.length > 0 || hadJd || undefined}>
         <summary className="flex cursor-pointer list-none items-center justify-between px-3 py-2.5 text-sm font-medium">
           <span>
             Job description <span className="font-normal text-zinc-500">(optional)</span>
@@ -105,6 +110,9 @@ export function BriefForm() {
           <span className="text-zinc-400 transition group-open:rotate-180">⌄</span>
         </summary>
         <div className="border-t border-zinc-200 p-3 dark:border-zinc-800">
+          {hadJd && !jd && (
+            <p className="mb-2 text-sm text-amber-700 dark:text-amber-400">The earlier brief used a job description. Paste it again to include it (it isn&apos;t saved).</p>
+          )}
           <textarea id="jd" value={jd} onChange={(e) => (setJd(e.target.value), clearError("jd"))} rows={7} placeholder="Paste the posting for facts about this exact role." className="input resize-y font-mono text-xs" aria-label="Job description" aria-invalid={!!errors.jd} />
           <div className="mt-1 flex justify-between text-xs text-zinc-500">
             <span className="text-red-600 dark:text-red-400">{errors.jd}</span>

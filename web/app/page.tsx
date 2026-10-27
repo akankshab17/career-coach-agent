@@ -1,5 +1,6 @@
-import { BriefForm } from "@/components/BriefForm";
 import { Header } from "@/components/Header";
+import { History } from "@/components/History";
+import { PrefilledBriefForm } from "@/components/PrefilledBriefForm";
 
 export default function Home() {
   return (
@@ -12,7 +13,8 @@ export default function Home() {
             A brief on the company, the interview process and the role, where every sentence cites the page it came from.
           </p>
         </div>
-        <BriefForm />
+        <PrefilledBriefForm />
+        <History />
       </main>
     </>
   );
