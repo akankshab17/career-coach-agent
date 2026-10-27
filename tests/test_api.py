@@ -256,6 +256,35 @@ def test_an_access_code_is_required_when_set(env, monkeypatch):
     assert c.post("/briefs", json=REQ, headers=ok).status_code == 202
 
 
+# ---- internal key (only the Next.js server knows it) ----
+
+GUARDED = (("post", "/briefs"), ("get", "/briefs"), ("get", "/briefs/x"), ("get", "/briefs/x/debug"), ("get", "/auth"))
+
+
+def test_no_internal_key_set_means_open(env):
+    assert env["client"].get("/auth").status_code == 200
+
+
+def test_an_internal_key_is_required_when_set(env, monkeypatch):
+    monkeypatch.setenv("INTERNAL_API_KEY", "k" * 40)
+    c = env["client"]
+    assert c.get("/health").status_code == 200  # health stays open (Cloud Run's probe has no key)
+    for method, url in GUARDED:
+        assert getattr(c, method)(url, **({"json": REQ} if method == "post" else {})).status_code == 401, url
+    assert c.post("/briefs", json=REQ, headers={"X-Internal-Key": "k" * 39}).status_code == 401
+    assert env["store"].count("queued") == 0
+    assert c.post("/briefs", json=REQ, headers={"X-Internal-Key": "k" * 40}).status_code == 202
+
+
+def test_internal_key_and_access_code_are_both_checked_when_both_are_set(env, monkeypatch):
+    monkeypatch.setenv("INTERNAL_API_KEY", "k" * 40)
+    monkeypatch.setenv("APP_ACCESS_CODE", "s3cret")
+    c = env["client"]
+    assert c.get("/auth", headers={"X-Internal-Key": "k" * 40}).status_code == 401
+    assert c.get("/auth", headers={"X-Access-Code": "s3cret"}).status_code == 401
+    assert c.get("/auth", headers={"X-Internal-Key": "k" * 40, "X-Access-Code": "s3cret"}).status_code == 200
+
+
 def test_a_lowercase_company_is_stored_and_run_title_cased(env):
     job = post(env, company="uber")
     assert job["company"] == "Uber"

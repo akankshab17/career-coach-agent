@@ -187,11 +187,13 @@ All settings are in `.env` (copy `.env.example`). The main ones:
 | `FALLBACK_PROVIDER`, `FALLBACK_EXTRACT_MODEL`, `FALLBACK_WRITE_MODEL` | `openai`, `gpt-5.6-luna`, `gpt-5.4-mini` | Used only after a Groq daily limit |
 | `OPENAI_BUDGET_USD` | 3.00 | Stop using the fallback past this tracked spend |
 | `APP_ACCESS_CODE` | (blank) | If set, the web app and API require it |
+| `INTERNAL_API_KEY` | (blank) | If set, every API endpoint but `/health` requires it in `X-Internal-Key` (the Next.js server sends it) |
+| `REQUIRE_INTERNAL_KEY` | (off) | `1` = the API refuses to start without an `INTERNAL_API_KEY` of 32+ characters |
 | `MAX_BRIEFS_PER_DAY` | 5 | New briefs per UTC day in the web app (0 = no limit) |
 
 ### Tests and evals
 ```
-pytest                                          # 518 tests, no network calls
+pytest                                          # 524 tests, no network calls
 RUN_DOCKER_TESTS=1 pytest tests/test_deploy.py  # also builds and runs the Docker image (needs Docker)
 
 python evals/run_evals.py --record              # live: records search results and pages to evals/fixtures/

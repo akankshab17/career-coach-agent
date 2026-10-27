@@ -45,6 +45,20 @@ def test_the_server_refuses_to_start_without_a_long_enough_code_when_required(mo
             api.serve()
 
 
+@pytest.mark.parametrize("key, ok", [(None, False), ("x" * 31, False), ("x" * 32, True)])
+def test_the_server_refuses_to_start_without_a_long_enough_internal_key_when_required(monkeypatch, key, ok):
+    monkeypatch.setattr(api, "load_dotenv", lambda *a, **k: None)
+    monkeypatch.setattr(api, "create_app", lambda: "app")
+    monkeypatch.setenv("REQUIRE_INTERNAL_KEY", "1")
+    if key is not None:
+        monkeypatch.setenv("INTERNAL_API_KEY", key)
+    if ok:
+        assert api.serve() == "app"
+    else:
+        with pytest.raises(RuntimeError, match="INTERNAL_API_KEY"):
+            api.serve()
+
+
 def test_without_the_requirement_a_missing_code_is_allowed_for_local_use(monkeypatch):
     monkeypatch.setattr(api, "load_dotenv", lambda *a, **k: None)
     monkeypatch.setattr(api, "create_app", lambda: "app")
