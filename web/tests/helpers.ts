@@ -27,3 +27,18 @@ export function request(path: string, init: { method?: string; json?: unknown; c
 export function cookieFrom(response: Response): string {
   return (response.headers.get("Set-Cookie") ?? "").split(";")[0];
 }
+
+export const JOB_ID = "0123456789abcdef0123456789abcdef";
+
+/** A FastAPI job view (src/api.py job_view) with overrides. */
+export function job(overrides: Record<string, unknown> = {}) {
+  return {
+    job_id: JOB_ID, status: "running", step: "search", steps: [], company: "Stripe", role: "Software Engineer",
+    level: "new-grad", location: "United States", created_at: "2026-10-27T12:00:00+00:00",
+    started_at: "2026-10-27T12:00:01+00:00", finished_at: null, error: null, has_jd: false, reused: false,
+    ...overrides,
+  };
+}
+
+/** Route handler context for /api/briefs/[id]. */
+export const ctx = (id: string) => ({ params: Promise.resolve({ id }) });

@@ -21,6 +21,8 @@ export async function proxy(request: NextRequest) {
 }
 
 export const config = {
-  // Everything except the login page/route, the health check, and static files.
-  matcher: ["/((?!login|api/login|api/health|_next/static|_next/image|favicon.ico).*)"],
+  // Everything except the login page/route, the health check, and Next's own files. All of /_next is excluded, not
+  // just /_next/static: redirecting the dev server's hot-reload socket (/_next/webpack-hmr) to /login made the
+  // login page reload itself in a loop.
+  matcher: ["/((?!login|api/login|api/health|_next/|__nextjs|favicon.ico).*)"],
 };
