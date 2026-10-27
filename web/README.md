@@ -34,3 +34,15 @@ npm run build
 `/login` posts the code to `/api/login`, which sets a signed session cookie. `proxy.ts` (Next 16's name for
 middleware) sends visitors without one to `/login` (pages) or answers 401 (`/api/*`); route handlers check again
 with `requireSession` (`lib/http.ts`). Open without login: `/login`, `/api/login`, `/api/health`.
+
+## API routes (this server)
+| Route | What it does |
+|---|---|
+| `POST /api/login` `{code}` | Sets the session cookie. 10 attempts per IP per 15 min |
+| `POST /api/logout` | Clears it |
+| `GET /api/health` | `{web, api}`: is FastAPI reachable (open, no login) |
+| `POST /api/briefs` | `{company, role, level?, location?, jd?, rerun?}` → zod (`lib/schema.ts`) → rate limit → FastAPI `POST /briefs`. 202 with the job; 400 bad input; 429 too many (`Retry-After`); 502/503 FastAPI problems |
+
+Rate limits (`lib/ratelimit.ts`): 3 briefs per session per 10 min and 10 per IP per hour, counted only for valid
+requests. They live in each server instance's memory (best effort on Vercel); FastAPI's `MAX_BRIEFS_PER_DAY` is the
+real cap.
