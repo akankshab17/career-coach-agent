@@ -31,7 +31,14 @@ npm test            # Vitest
 npm run typecheck   # tsc --noEmit
 npm run lint        # ESLint, no warnings allowed
 npm run build
+npm run test:e2e    # Playwright: builds into .next-e2e, starts the fake API (8100) and Next (3100) itself
 ```
+The end-to-end test (`e2e/brief.spec.ts`) logs in, builds a brief against `scripts/fake_api.py`, follows the live
+progress, checks the citation chips, sources and download, and finds the brief in the history. First run:
+`npx playwright install chromium`. It uses its own ports and build folder, so `npm run dev` can stay running.
+
+CI (`.github/workflows/ci.yml`) runs pytest, typecheck, lint, Vitest and Playwright on every push and pull request,
+with no secrets.
 
 ## Environment variables
 | Var | Purpose |
