@@ -183,6 +183,14 @@ fresh `INTERNAL_API_KEY` are Container App secrets: `deploy/azure/render_app.py`
 owner-only file that is deleted after `az containerapp create --yaml`. The app scales to zero 300 s after the last
 request, and its disk (jobs, cache, daily count) starts empty after that, as on Render.
 
+```
+ENV_ID=$(az containerapp env show -n interview-brief-env -g interview-brief-rg --query id -o tsv)
+python deploy/azure/render_app.py --image ghcr.io/akankshab17/interview-brief-api:<sha> --environment-id "$ENV_ID" --out <private file>
+az containerapp create -n interview-brief-api -g interview-brief-rg --yaml <private file>   # then delete the file
+# the key the web server needs (prints it: run it yourself, paste into Vercel)
+az containerapp secret show -n interview-brief-api -g interview-brief-rg --secret-name internal-api-key --query value -o tsv
+```
+
 ### Configuration
 All settings are in `.env` (copy `.env.example`). The main ones:
 
