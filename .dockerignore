@@ -17,3 +17,8 @@ last_run*.md
 .git/
 .DS_Store
 **/.DS_Store
+# The web app and dev scripts are never in an image (web/node_modules alone is hundreds of MB of build context).
+web/
+scripts/
+deploy/
+.github/

@@ -222,3 +222,94 @@ def test_the_streamlit_toolbar_hides_deploy_and_developer_menu():
     config = (ROOT / ".streamlit" / "config.toml").read_text()
     assert 'toolbarMode = "viewer"' in config
     assert "COPY --chown=user .streamlit/ .streamlit/" in (ROOT / "Dockerfile").read_text()  # the image needs it too
+
+
+# ---- Azure Container Apps: the API-only image and its app definition ----
+
+def _render_app_module():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("render_app", ROOT / "deploy" / "azure" / "render_app.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_api_image_runs_only_uvicorn_with_the_internal_key_required():
+    docker = (ROOT / "Dockerfile.api").read_text()
+    for setting in ("REQUIRE_INTERNAL_KEY=1", "PRIVATE_BRIEFS=1", "MAX_BRIEFS_PER_DAY=5", "EXTRACT_CONCURRENCY=3",
+                    "USER user", "--uid 1000", "mkdir -p /home/user/app/.cache", "EXPOSE 8000"):
+        assert setting in docker, setting
+    assert 'CMD ["uvicorn", "--app-dir", "src", "--factory", "api:serve", "--host", "0.0.0.0", "--port", "8000"]' in docker
+    copied = [line.split()[-2] for line in docker.splitlines() if line.startswith("COPY")]
+    assert copied == ["requirements.txt", "src/"]  # no app.py/Streamlit, no .env
+    assert "REQUIRE_ACCESS_CODE" not in docker  # login moved to the Next.js server
+    ignore = (ROOT / ".dockerignore").read_text().splitlines()
+    for entry in (".env", ".cache/", "web/", "scripts/"):
+        assert entry in ignore, entry
+
+
+def test_the_azure_app_definition_scales_to_zero_with_one_replica_https_and_probes():
+    import yaml
+
+    mod = _render_app_module()
+    values = {"TAVILY_API_KEY": "tvly-x", "GROQ_API_KEY": "gsk_x", "OPENAI_API_KEY": 'sk-"quoted"', "INTERNAL_API_KEY": "k" * 64,
+              "IMAGE": "ghcr.io/akankshab17/interview-brief-api:abc123", "ENVIRONMENT_ID": "/subscriptions/s/env"}
+    app = yaml.safe_load(mod.render(mod.TEMPLATE.read_text(), values, {"LLM_MODEL": "openai/gpt-oss-120b"}))
+    props = app["properties"]
+    assert app["location"] == "canadacentral"
+    ingress = props["configuration"]["ingress"]
+    assert (ingress["external"], ingress["targetPort"], ingress["allowInsecure"]) == (True, 8000, False)
+    secrets = {s["name"]: s["value"] for s in props["configuration"]["secrets"]}
+    assert secrets["openai-api-key"] == 'sk-"quoted"' and secrets["internal-api-key"] == "k" * 64
+    (container,) = props["template"]["containers"]
+    assert container["image"] == values["IMAGE"]
+    assert container["resources"] == {"cpu": 0.5, "memory": "1Gi"}
+    env = {e["name"]: e for e in container["env"]}
+    for name in ("TAVILY_API_KEY", "GROQ_API_KEY", "OPENAI_API_KEY", "INTERNAL_API_KEY"):
+        assert "value" not in env[name] and env[name]["secretRef"]  # secrets only by reference
+    assert env["LLM_MODEL"]["value"] == "openai/gpt-oss-120b"
+    probes = {p["type"]: p["httpGet"] for p in container["probes"]}
+    assert set(probes) == {"Startup", "Readiness", "Liveness"}
+    assert all(p == {"path": "/health", "port": 8000} for p in probes.values())
+    assert props["template"]["scale"] == {"minReplicas": 0, "maxReplicas": 1}
+
+
+def test_the_azure_template_holds_no_secret_values_and_refuses_to_leave_placeholders():
+    mod = _render_app_module()
+    text = mod.TEMPLATE.read_text()
+    assert not any(marker in text for marker in ("gsk_", "tvly-", "sk-"))
+    for key in ("TAVILY_API_KEY", "GROQ_API_KEY", "OPENAI_API_KEY", "INTERNAL_API_KEY", "IMAGE", "ENVIRONMENT_ID"):
+        assert f'"{{{{{key}}}}}"' in text, key
+    with pytest.raises(ValueError, match="placeholder"):
+        mod.render(text, {"IMAGE": "x"}, {})
+
+
+def test_the_renderer_writes_an_owner_only_file_and_prints_no_secret(tmp_path, monkeypatch, capsys):
+    mod = _render_app_module()
+    env_file = tmp_path / ".env"
+    env_file.write_text("TAVILY_API_KEY=tvly-secret\nGROQ_API_KEY=gsk_secret\nOPENAI_API_KEY=sk-secret\nLLM_PROVIDER=groq\n")
+    out = tmp_path / "app.yaml"
+    monkeypatch.delenv("INTERNAL_API_KEY", raising=False)
+    monkeypatch.setattr("sys.argv", ["render_app.py", "--image", "img:1", "--environment-id", "/env", "--out", str(out),
+                                     "--env-file", str(env_file)])
+    assert mod.main() == 0
+    assert out.stat().st_mode & 0o777 == 0o600
+    assert "tvly-secret" in out.read_text() and "LLM_PROVIDER" in out.read_text()
+    printed = capsys.readouterr()
+    assert not any(s in printed.out + printed.err for s in ("tvly-secret", "gsk_secret", "sk-secret"))
+
+
+def test_the_image_workflow_pushes_amd64_sha_and_latest_tags_with_the_workflow_token():
+    import yaml
+
+    workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "image.yml").read_text())
+    assert workflow["permissions"] == {"contents": "read", "packages": "write"}
+    assert set(workflow[True]["push"]["branches"]) == {"web-ui", "main"}  # YAML reads the key `on` as True
+    steps = workflow["jobs"]["build"]["steps"]
+    login = next(s for s in steps if s.get("uses", "").startswith("docker/login-action"))
+    assert login["with"]["password"] == "${{ secrets.GITHUB_TOKEN }}"
+    build = next(s for s in steps if s.get("uses", "").startswith("docker/build-push-action"))["with"]
+    assert (build["file"], build["platforms"], build["push"]) == ("Dockerfile.api", "linux/amd64", True)
+    assert "ghcr.io/akankshab17/interview-brief-api:${{ github.sha }}" in build["tags"]
+    assert "ghcr.io/akankshab17/interview-brief-api:latest" in build["tags"]

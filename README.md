@@ -173,6 +173,16 @@ One container runs both processes. Only Streamlit is exposed; the API listens on
 ### Deploy (Render, free)
 `render.yaml` describes one free web service built from the `Dockerfile`, with Streamlit's health check. In Render: **New, Blueprint**, pick this repo, and enter the four values it asks for (`TAVILY_API_KEY`, `GROQ_API_KEY`, `OPENAI_API_KEY`, and a new `APP_ACCESS_CODE`). Keys live only in Render's environment settings, never in the repo. The free instance has 512 MB of RAM and 0.1 CPU and sleeps after 15 minutes without traffic.
 
+### Deploy the API (Azure Container Apps, for the new web app in `web/`)
+`Dockerfile.api` is the API on its own (uvicorn on port 8000, `REQUIRE_INTERNAL_KEY=1`). The **API image** workflow
+(`.github/workflows/image.yml`) builds it for linux/amd64 on every push to `web-ui` or `main` that touches the API and
+pushes `ghcr.io/akankshab17/interview-brief-api:<git sha>` and `:latest` with the workflow's own token.
+`deploy/azure/app.template.yaml` defines the Container App: Consumption plan in canadacentral, 0.5 vCPU / 1 GiB,
+0 to 1 replica (one worker and SQLite), HTTPS only, startup/readiness/liveness probes on `/health`. The API keys and a
+fresh `INTERNAL_API_KEY` are Container App secrets: `deploy/azure/render_app.py` fills the template from `.env` into an
+owner-only file that is deleted after `az containerapp create --yaml`. The app scales to zero 300 s after the last
+request, and its disk (jobs, cache, daily count) starts empty after that, as on Render.
+
 ### Configuration
 All settings are in `.env` (copy `.env.example`). The main ones:
 
@@ -193,7 +203,7 @@ All settings are in `.env` (copy `.env.example`). The main ones:
 
 ### Tests and evals
 ```
-pytest                                          # 524 tests, no network calls
+pytest                                          # 529 tests, no network calls
 RUN_DOCKER_TESTS=1 pytest tests/test_deploy.py  # also builds and runs the Docker image (needs Docker)
 
 python evals/run_evals.py --record              # live: records search results and pages to evals/fixtures/
