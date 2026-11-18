@@ -51,6 +51,15 @@ describe("access code", () => {
     configure({ APP_ACCESS_CODE: "" });
     expect(() => accessCodeMatches("anything")).toThrow(ConfigError);
   });
+
+  it("requires a 16+ character code on Vercel, but not locally", () => {
+    configure({ APP_ACCESS_CODE: "local-demo" });
+    expect(accessCodeMatches("local-demo")).toBe(true);
+    vi.stubEnv("VERCEL", "1");
+    expect(() => accessCodeMatches("local-demo")).toThrow(ConfigError);
+    vi.stubEnv("APP_ACCESS_CODE", "x".repeat(16));
+    expect(accessCodeMatches("x".repeat(16))).toBe(true);
+  });
 });
 
 describe("safeNextPath", () => {

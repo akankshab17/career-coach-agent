@@ -9,6 +9,12 @@ import { jwtVerify, SignJWT } from "jose";
 export const SESSION_COOKIE = "ib_session";
 export const SESSION_TTL_SECONDS = 7 * 24 * 60 * 60;
 export const MIN_SECRET_LENGTH = 32;
+export const MIN_DEPLOYED_CODE_LENGTH = 16; // there is no lockout after wrong codes, only a rate limit, so it must be long
+
+/** Running on Vercel (it sets VERCEL=1). Not NODE_ENV: the e2e test runs a production build against plain HTTP. */
+export function isDeployed(): boolean {
+  return process.env.VERCEL === "1";
+}
 
 export type Session = { sid: string; exp: number };
 
@@ -32,6 +38,9 @@ function secretKey(): Uint8Array {
 export function accessCodeMatches(input: string): boolean {
   const expected = process.env.APP_ACCESS_CODE ?? "";
   if (!expected) throw new ConfigError("APP_ACCESS_CODE is not set.");
+  if (isDeployed() && expected.length < MIN_DEPLOYED_CODE_LENGTH) {
+    throw new ConfigError(`APP_ACCESS_CODE must be at least ${MIN_DEPLOYED_CODE_LENGTH} characters on Vercel.`);
+  }
   const digest = (s: string) => createHash("sha256").update(s, "utf8").digest();
   return timingSafeEqual(digest(input), digest(expected));
 }

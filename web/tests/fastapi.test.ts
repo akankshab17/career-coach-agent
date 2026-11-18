@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { callFastapi, FastapiUnavailableError, fastapiUrl } from "@/lib/fastapi";
+import { ConfigError } from "@/lib/session";
 
 function stubFetch(response: Response | Error) {
   const fetchMock = vi.fn(async (_url: string, _init: RequestInit): Promise<Response> => {
@@ -61,5 +62,18 @@ describe("callFastapi", () => {
   it("defaults to the local API", () => {
     vi.stubEnv("FASTAPI_URL", "");
     expect(fastapiUrl()).toBe("http://localhost:8000");
+  });
+
+  it("on Vercel, refuses a missing or plain-http URL before sending the key", async () => {
+    vi.stubEnv("VERCEL", "1");
+    vi.stubEnv("INTERNAL_API_KEY", "k".repeat(40));
+    vi.stubEnv("FASTAPI_URL", "");
+    expect(() => fastapiUrl()).toThrow(ConfigError);
+    vi.stubEnv("FASTAPI_URL", "http://api.example.com");
+    const fetchMock = stubFetch(Response.json({}));
+    await expect(callFastapi("/health")).rejects.toBeInstanceOf(ConfigError);
+    expect(fetchMock).not.toHaveBeenCalled();
+    vi.stubEnv("FASTAPI_URL", "https://api.example.com/");
+    expect(fastapiUrl()).toBe("https://api.example.com");
   });
 });

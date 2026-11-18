@@ -75,3 +75,18 @@ real cap.
 - `/briefs/:id` live progress (`components/Progress.tsx`: connecting, waking up, waiting in line, steps, failed,
   expired), then the brief (`components/BriefView.tsx`): numbered citation chips jump to the Sources list,
   external links open in a new tab, raw HTML is never rendered, **Download .md** gives the original markdown.
+
+## Deploy on Vercel (Hobby, free)
+Import the GitHub repo from `main` with **Root Directory** `web` (framework Next.js, defaults for build/output) and
+**Node.js Version** `24.x` (`engines` pins it too). Set these for Production and Preview, marked **Sensitive**:
+
+| Variable | Value |
+|---|---|
+| `FASTAPI_URL` | The Azure Container App URL (`https://...azurecontainerapps.io`, no trailing slash) |
+| `INTERNAL_API_KEY` | The same key as the Container App secret `internal-api-key` (see the repo README) |
+| `APP_ACCESS_CODE` | A new random code, 16+ characters (`openssl rand -base64 18`) |
+| `SESSION_SECRET` | `openssl rand -hex 32`; changing it logs everyone out |
+
+On Vercel (`VERCEL=1`) the server refuses an access code shorter than 16 characters and a `FASTAPI_URL` that is not
+`https://` (500, logged; `/api/health` shows `web: misconfigured`). Env changes apply only after a redeploy; change
+`INTERNAL_API_KEY` on Azure and Vercel together.
