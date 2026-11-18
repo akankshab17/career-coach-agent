@@ -173,6 +173,24 @@ One container runs both processes. Only Streamlit is exposed; the API listens on
 ### Deploy (Render, free)
 `render.yaml` describes one free web service built from the `Dockerfile`, with Streamlit's health check. In Render: **New, Blueprint**, pick this repo, and enter the four values it asks for (`TAVILY_API_KEY`, `GROQ_API_KEY`, `OPENAI_API_KEY`, and a new `APP_ACCESS_CODE`). Keys live only in Render's environment settings, never in the repo. The free instance has 512 MB of RAM and 0.1 CPU and sleeps after 15 minutes without traffic.
 
+### Deploy the API (Azure Container Apps, for the new web app in `web/`)
+`Dockerfile.api` is the API on its own (uvicorn on port 8000, `REQUIRE_INTERNAL_KEY=1`). The **API image** workflow
+(`.github/workflows/image.yml`) builds it for linux/amd64 on every push to `web-ui` or `main` that touches the API and
+pushes `ghcr.io/akankshab17/interview-brief-api:<git sha>` and `:latest` with the workflow's own token.
+`deploy/azure/app.template.yaml` defines the Container App: Consumption plan in canadacentral, 0.5 vCPU / 1 GiB,
+0 to 1 replica (one worker and SQLite), HTTPS only, startup/readiness/liveness probes on `/health`. The API keys and a
+fresh `INTERNAL_API_KEY` are Container App secrets: `deploy/azure/render_app.py` fills the template from `.env` into an
+owner-only file that is deleted after `az containerapp create --yaml`. The app scales to zero 300 s after the last
+request, and its disk (jobs, cache, daily count) starts empty after that, as on Render.
+
+```
+ENV_ID=$(az containerapp env show -n interview-brief-env -g interview-brief-rg --query id -o tsv)
+python deploy/azure/render_app.py --image ghcr.io/akankshab17/interview-brief-api:<sha> --environment-id "$ENV_ID" --out <private file>
+az containerapp create -n interview-brief-api -g interview-brief-rg --yaml <private file>   # then delete the file
+# the key the web server needs (prints it: run it yourself, paste into Vercel)
+az containerapp secret show -n interview-brief-api -g interview-brief-rg --secret-name internal-api-key --query value -o tsv
+```
+
 ### Configuration
 All settings are in `.env` (copy `.env.example`). The main ones:
 
@@ -187,11 +205,13 @@ All settings are in `.env` (copy `.env.example`). The main ones:
 | `FALLBACK_PROVIDER`, `FALLBACK_EXTRACT_MODEL`, `FALLBACK_WRITE_MODEL` | `openai`, `gpt-5.6-luna`, `gpt-5.4-mini` | Used only after a Groq daily limit |
 | `OPENAI_BUDGET_USD` | 3.00 | Stop using the fallback past this tracked spend |
 | `APP_ACCESS_CODE` | (blank) | If set, the web app and API require it |
+| `INTERNAL_API_KEY` | (blank) | If set, every API endpoint but `/health` requires it in `X-Internal-Key` (the Next.js server sends it) |
+| `REQUIRE_INTERNAL_KEY` | (off) | `1` = the API refuses to start without an `INTERNAL_API_KEY` of 32+ characters |
 | `MAX_BRIEFS_PER_DAY` | 5 | New briefs per UTC day in the web app (0 = no limit) |
 
 ### Tests and evals
 ```
-pytest                                          # 518 tests, no network calls
+pytest                                          # 529 tests, no network calls
 RUN_DOCKER_TESTS=1 pytest tests/test_deploy.py  # also builds and runs the Docker image (needs Docker)
 
 python evals/run_evals.py --record              # live: records search results and pages to evals/fixtures/

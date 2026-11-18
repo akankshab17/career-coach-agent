@@ -1,0 +1,30 @@
+# The API on its own (no Streamlit), for Azure Container Apps. The Next.js app in web/ is the only client; it sends
+# X-Internal-Key, and REQUIRE_INTERNAL_KEY=1 makes the API refuse to start without one. Built and pushed to GHCR by
+# .github/workflows/image.yml. Secrets come from the platform as environment variables: nothing secret is in the image.
+# (Dockerfile + start.sh still build the Streamlit image that Render runs, until the Streamlit UI is retired.)
+FROM python:3.12-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    REQUIRE_INTERNAL_KEY=1 \
+    PRIVATE_BRIEFS=1 \
+    MAX_BRIEFS_PER_DAY=5 \
+    EXTRACT_CONCURRENCY=3
+
+# Unprivileged user (uid 1000) owning the app directory and .cache/ (jobs.db, extraction cache, spend.json), created
+# before USER: WORKDIR alone would make it root-owned (PermissionError on '.cache').
+RUN useradd --create-home --uid 1000 user \
+    && mkdir -p /home/user/app/.cache \
+    && chown -R user:user /home/user/app
+ENV HOME=/home/user
+WORKDIR /home/user/app
+
+COPY --chown=user requirements.txt .
+RUN pip install -r requirements.txt
+
+COPY --chown=user src/ src/
+
+USER user
+EXPOSE 8000
+CMD ["uvicorn", "--app-dir", "src", "--factory", "api:serve", "--host", "0.0.0.0", "--port", "8000"]

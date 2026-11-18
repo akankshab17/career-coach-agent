@@ -7,6 +7,9 @@ GET /briefs/{id} reports status, the current step and, when done, the brief. Job
 If APP_ACCESS_CODE is set, every endpoint but /health needs it in the X-Access-Code header. In production (the Docker image)
 REQUIRE_ACCESS_CODE=1 makes the server refuse to start without one, PRIVATE_BRIEFS=1 turns off listing everyone's briefs,
 and MAX_BRIEFS_PER_DAY caps how many new briefs start per UTC day (shared Groq/Tavily quota).
+
+If INTERNAL_API_KEY is set, every endpoint but /health also needs it in the X-Internal-Key header: only the Next.js server
+(web/) knows it, so the API can't be used directly from the internet. REQUIRE_INTERNAL_KEY=1 refuses to start without one.
 """
 from __future__ import annotations
 
@@ -35,6 +38,8 @@ MAX_QUEUED = 20  # more waiting jobs than this and new requests are refused (429
 DAILY_ENV, DEFAULT_DAILY = "MAX_BRIEFS_PER_DAY", 5  # new briefs per UTC day (0 = no limit); Tavily free plan = 1,000 credits/month
 REQUIRE_ENV, PRIVATE_ENV = "REQUIRE_ACCESS_CODE", "PRIVATE_BRIEFS"
 MIN_ACCESS_CODE = 16  # characters, when a code is required: there is no lockout after wrong guesses
+INTERNAL_ENV, INTERNAL_HEADER, REQUIRE_INTERNAL_ENV = "INTERNAL_API_KEY", "X-Internal-Key", "REQUIRE_INTERNAL_KEY"
+MIN_INTERNAL_KEY = 32  # characters: a machine-to-machine secret (openssl rand -hex 32 gives 64)
 
 
 def _flag(name: str) -> bool:
@@ -184,6 +189,13 @@ def require_access_code(x_access_code: str | None = Header(None)) -> None:
         raise HTTPException(status_code=401, detail=f"Missing or wrong access code (send it in the {ACCESS_HEADER} header).")
 
 
+def require_internal_key(x_internal_key: str | None = Header(None)) -> None:
+    """When INTERNAL_API_KEY is set, the X-Internal-Key header must match it (constant-time compare). Unset = open (local use)."""
+    expected = os.getenv(INTERNAL_ENV, "")
+    if expected and not hmac.compare_digest((x_internal_key or "").encode(), expected.encode()):
+        raise HTTPException(status_code=401, detail="Missing or wrong internal API key.")
+
+
 # ---------- the app ----------
 
 def create_app(db_path: str = DB_PATH, runner: Runner = default_runner, start_worker: bool = True, store: JobStore | None = None) -> FastAPI:
@@ -204,7 +216,7 @@ def create_app(db_path: str = DB_PATH, runner: Runner = default_runner, start_wo
 
     app = FastAPI(title="Career-coach brief API", lifespan=lifespan)
     app.state.store, app.state.worker = store, worker
-    guarded = [Depends(require_access_code)]
+    guarded = [Depends(require_internal_key), Depends(require_access_code)]
 
     @app.get("/health")
     def health() -> dict:
@@ -267,4 +279,8 @@ def serve() -> FastAPI:
     if _flag(REQUIRE_ENV) and len(code) < MIN_ACCESS_CODE:
         raise RuntimeError(f"{REQUIRE_ENV} is on but {ACCESS_ENV} is {'not set' if not code else 'too short'}: set a random code of "
                            f"at least {MIN_ACCESS_CODE} characters as a secret (refusing to start without one).")
+    key = os.getenv(INTERNAL_ENV, "")
+    if _flag(REQUIRE_INTERNAL_ENV) and len(key) < MIN_INTERNAL_KEY:
+        raise RuntimeError(f"{REQUIRE_INTERNAL_ENV} is on but {INTERNAL_ENV} is {'not set' if not key else 'too short'}: set a random "
+                           f"key of at least {MIN_INTERNAL_KEY} characters (openssl rand -hex 32) on the API and the web server.")
     return create_app()

@@ -1,0 +1,59 @@
+# Azure Container Apps definition for the API (az containerapp create --yaml). deploy/azure/render_app.py fills the
+# {{PLACEHOLDERS}}: secret values never live in this file or the repo. Consumption plan: billed per second only while
+# a replica runs; scale to zero after the default 300 s cooldown with no HTTP requests.
+location: canadacentral
+properties:
+  managedEnvironmentId: "{{ENVIRONMENT_ID}}"
+  configuration:
+    activeRevisionsMode: Single
+    ingress:
+      external: true
+      targetPort: 8000
+      transport: auto
+      allowInsecure: false # HTTP is redirected to HTTPS
+    secrets:
+      - name: tavily-api-key
+        value: "{{TAVILY_API_KEY}}"
+      - name: groq-api-key
+        value: "{{GROQ_API_KEY}}"
+      - name: openai-api-key
+        value: "{{OPENAI_API_KEY}}"
+      - name: internal-api-key
+        value: "{{INTERNAL_API_KEY}}"
+  template:
+    containers:
+      - name: api
+        image: "{{IMAGE}}"
+        resources:
+          cpu: 0.5
+          memory: 1Gi
+        env:
+          - name: TAVILY_API_KEY
+            secretRef: tavily-api-key
+          - name: GROQ_API_KEY
+            secretRef: groq-api-key
+          - name: OPENAI_API_KEY
+            secretRef: openai-api-key
+          - name: INTERNAL_API_KEY
+            secretRef: internal-api-key
+          # {{SETTINGS}}  (non-secret model settings copied from .env)
+        probes:
+          - type: Startup # imports take a while on a cold start: allow up to 2 minutes
+            httpGet: { path: /health, port: 8000 }
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            failureThreshold: 24
+            timeoutSeconds: 3
+          - type: Readiness
+            httpGet: { path: /health, port: 8000 }
+            periodSeconds: 10
+            failureThreshold: 3
+            timeoutSeconds: 3
+          - type: Liveness
+            httpGet: { path: /health, port: 8000 }
+            periodSeconds: 30
+            failureThreshold: 3
+            timeoutSeconds: 5
+    scale:
+      minReplicas: 0
+      maxReplicas: 1 # one worker thread + SQLite: never two replicas

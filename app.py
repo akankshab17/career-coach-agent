@@ -28,6 +28,8 @@ class APIError(Exception):
 
 def call(method: str, path: str, **kw) -> dict | list:
     headers = {"X-Access-Code": st.session_state["access_code"]} if st.session_state.get("access_code") else {}
+    if os.getenv("INTERNAL_API_KEY"):  # the API may also require the shared server-to-server key
+        headers["X-Internal-Key"] = os.environ["INTERNAL_API_KEY"]
     try:
         r = httpx.request(method, f"{API_URL}{path}", headers=headers, timeout=20, **kw)
     except httpx.HTTPError as exc:
