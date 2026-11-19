@@ -84,7 +84,7 @@ describe("helpers", () => {
     expect(hostname("https://www.reddit.com/r/x")).toBe("reddit.com");
   });
 
-  it("briefFileName matches the Streamlit app's naming", () => {
+  it("briefFileName is company-role-level.md", () => {
     expect(briefFileName({ company: "Amazon", role: "Software Development Engineer", level: "new-grad" })).toBe(
       "amazon-software-development-engineer-new-grad.md",
     );

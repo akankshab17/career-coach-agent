@@ -9,7 +9,7 @@ import { detailOf } from "@/lib/upstream";
 
 export type BriefEvent =
   | { type: "job"; job: JobView } // new status/step/log line, or the finished job (status done|failed)
-  | { type: "waking" } // FastAPI not answering: probably a cold start (Cloud Run scales to zero)
+  | { type: "waking" } // FastAPI not answering: probably a cold start (Azure scales to zero)
   | { type: "expired" } // FastAPI has no such job: its disk was wiped by a restart, or the id is wrong
   | { type: "fatal"; detail: string } // won't fix itself (misconfiguration, server error)
   | { type: "ping" }; // keep-alive, so proxies don't close an idle connection

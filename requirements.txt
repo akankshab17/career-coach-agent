@@ -7,5 +7,3 @@ langgraph==1.2.16
 pyyaml==6.0.3
 fastapi==0.157.0
 uvicorn==0.54.0
-streamlit==1.66.0
-httpx==0.28.1
