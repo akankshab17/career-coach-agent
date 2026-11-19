@@ -91,7 +91,7 @@ export function hostname(url: string): string {
   }
 }
 
-/** Same name the Streamlit app used: company-role-level.md, lowercase, dashes. */
+/** company-role-level.md, lowercase, dashes. */
 export function briefFileName(job: { company: string; role: string; level: string }): string {
   const slug = `${job.company}-${job.role}-${job.level}`.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
   return `${slug || "brief"}.md`;

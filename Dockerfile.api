@@ -1,7 +1,6 @@
-# The API on its own (no Streamlit), for Azure Container Apps. The Next.js app in web/ is the only client; it sends
+# The API image for Azure Container Apps. The Next.js app in web/ is the only client; it sends
 # X-Internal-Key, and REQUIRE_INTERNAL_KEY=1 makes the API refuse to start without one. Built and pushed to GHCR by
 # .github/workflows/image.yml. Secrets come from the platform as environment variables: nothing secret is in the image.
-# (Dockerfile + start.sh still build the Streamlit image that Render runs, until the Streamlit UI is retired.)
 FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \

@@ -2,14 +2,14 @@
 
 Give it a company, a role and a level. It searches the web and writes an interview-prep brief in which every sentence links to the page it came from.
 
-**Live demo: [interview-brief.onrender.com](https://interview-brief.onrender.com).** It needs an access code, which I share on request so the API credits behind it aren't used up. The first load can take about a minute, because the free tier puts the service to sleep when nobody is using it.
+**Live demo: [interview-brief-ten.vercel.app](https://interview-brief-ten.vercel.app).** It needs an access code, which I share on request so the API credits behind it aren't used up. If nobody has used it for a few minutes, the API is asleep and the first request wakes it up, which adds a few seconds.
 
-![Input form](docs/form.png)
-
-![Example brief with citations](docs/screenshot.png)
+<!-- Screenshots of the Next.js app go here: docs/web-form.png (the form and recent briefs) and docs/web-brief.png (a finished brief with citation chips). -->
+*Screenshots of the new web app are coming soon.*
 
 ![Python 3.12](https://img.shields.io/badge/python-3.12-blue)
-![Tests](https://img.shields.io/badge/tests-518%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-638%20passing-brightgreen)
+![CI](https://github.com/akankshab17/career-coach-agent/actions/workflows/ci.yml/badge.svg)
 ![Pipeline](https://img.shields.io/badge/pipeline-LangGraph-informational)
 
 ## Why I built this
@@ -30,7 +30,7 @@ An excerpt from a real brief (Amazon, Software Developer, new grad), section 2. 
 
 Every brief has the same six sections: TL;DR, company overview and recent news, interview process (grouped by stage), what the role really needs, how to prepare, and questions to ask the interviewer. It ends with the list of cited sources and a line saying how many facts were checked and how many were rejected.
 
-**Performance:** about 4 minutes per brief on Render's free tier (0.1 CPU), and faster when run locally.
+**Performance:** about 4 minutes per brief on the deployed API (half a vCPU, most of it waiting on the LLM), and faster when run locally.
 
 ## Example output
 
@@ -41,9 +41,26 @@ Every brief has the same six sections: TL;DR, company overview and recent news, 
 - It relies on public web sources found through search APIs. Glassdoor is never used.
 - Forum posts can be noisy or out of date, so they are labelled as candidate reports rather than stated as fact.
 - Companies with little public data get thinner briefs.
-- The free hosting tier resets the brief history whenever the service sleeps.
+- The server forgets old briefs whenever the API scales to zero. Each browser keeps its own list of recent briefs, and an expired one can be rebuilt in one click.
+- Sources for a neighbouring role can slip in, for example Production Engineer reports in a Software Engineer brief.
+- The writer occasionally stretches a cited fact a little further than the source goes.
 
 More detail is in [Limitations and roadmap](#limitations-and-roadmap) below.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    B[Browser] --> V["Next.js on Vercel<br/>login, rate limits, validation, progress stream"]
+    V -- "HTTPS + internal key" --> A["FastAPI on Azure Container Apps<br/>job queue, one worker, the pipeline"]
+    A --> T[Tavily] & L[Groq / OpenAI]
+    G[GitHub Actions] -- "image" --> R[GHCR] -.-> A
+```
+
+- **Web app (`web/`):** Next.js with TypeScript, on Vercel's free plan. The browser only ever talks to this server. Its route handlers check the access code and keep the login in a signed, httpOnly cookie, rate-limit new briefs, validate input with zod, and forward requests to the API with a shared internal key that never reaches the browser. Progress reaches the page as a Server-Sent Events stream, which the server builds by polling the API every two seconds. Recent briefs are kept in the browser's localStorage.
+- **API (`src/api.py`):** FastAPI on Azure Container Apps, which scales to zero when idle. It rejects every request without the internal key, queues briefs in SQLite and runs them one at a time.
+- **Builds:** GitHub Actions builds the API's Docker image on every push to `main` that touches it and pushes it to GitHub Container Registry. Azure runs a specific image tag, so I choose when a new image goes live.
+- **CI:** every push runs pytest, the TypeScript type check, ESLint, Vitest and a Playwright end-to-end test. The end-to-end test runs the real API with a scripted pipeline, so CI needs no API keys and spends no credits.
 
 ## How it works
 
@@ -88,7 +105,7 @@ Every run also writes a debug report: per-source fact counts, every rejected fac
 
 | | |
 |---|---|
-| Tests | 518 passing (`pytest`), plus an opt-in test that builds and runs the Docker image |
+| Tests | 638 passing: 521 `pytest`, 116 Vitest and 1 Playwright end-to-end test, plus an opt-in test that builds and runs the Docker image |
 | Sentences dropped by finalize | 58% in the first design (write, then verify); 4 of 178 (about 2%) across the five baseline briefs |
 | Time per brief, uncached | 39 to 112 seconds end to end in the last live recording of the five cases |
 | Tokens per brief, uncached | 10k to 32k input, 3.7k to 13k output |
@@ -129,9 +146,10 @@ Cummins shows the weak spot: there is very little public interview data for it, 
 | Search | Tavily search and extract APIs |
 | LLMs | Groq (`gpt-oss-20b` for extraction, `gpt-oss-120b` for writing); OpenAI as a fallback |
 | API | FastAPI, Uvicorn, SQLite (job queue and store) |
-| Web app | Streamlit |
-| Tests | pytest, FastAPI TestClient, Streamlit AppTest |
-| Deploy | Docker, Render (free web service, `render.yaml`) |
+| Web app | Next.js 16 (App Router), TypeScript, Tailwind CSS, zod, jose |
+| Tests | pytest, FastAPI TestClient, Vitest, Playwright |
+| Deploy | Vercel (web), Azure Container Apps (API), Docker image on GitHub Container Registry |
+| CI | GitHub Actions |
 
 ## Run it locally
 
@@ -151,37 +169,33 @@ python src/main.py --company "Stripe" --role "Backend Engineer" --jd "$(cat jd.t
 
 ### Web app
 ```
-uvicorn --app-dir src --factory api:serve --host 127.0.0.1 --port 8000   # terminal 1: the API
-streamlit run app.py                                                     # terminal 2: http://localhost:8501
+INTERNAL_API_KEY=<key> uvicorn --app-dir src --factory api:serve --port 8000   # terminal 1: the API
+cd web && npm install && npm run dev                                        # terminal 2: http://localhost:3000
 ```
-The Streamlit app is a thin client of the API. `POST /briefs` queues a job and returns its id at once, and one background worker runs briefs one at a time. The app shows live progress, then the brief with clickable sources and a markdown download. The same inputs within 7 days return the existing brief instead of running again. Jobs are stored in SQLite and survive a restart.
+Put the same `INTERNAL_API_KEY` in `web/.env.local` (copy `web/.env.example`). `POST /briefs` queues a job and returns its id at once, and one background worker runs briefs one at a time. The page shows live progress, then the brief with numbered citation chips, its sources and a markdown download. The same inputs within 7 days return the existing brief instead of running again. `scripts/fake_api.py` runs the same API with a scripted pipeline, for trying the web app without spending credits. More in [web/README.md](web/README.md).
 
 ### Docker
 ```
-docker build -t interview-brief .
+docker build -f Dockerfile.api -t interview-brief-api .
 set -a; source .env; set +a
-export APP_ACCESS_CODE="$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')"
-docker run --rm -p 10000:10000 -e PORT=10000 -e TAVILY_API_KEY -e GROQ_API_KEY -e OPENAI_API_KEY \
-  -e FALLBACK_PROVIDER -e FALLBACK_EXTRACT_MODEL -e FALLBACK_WRITE_MODEL -e OPENAI_BUDGET_USD -e APP_ACCESS_CODE \
-  interview-brief
+export INTERNAL_API_KEY="$(openssl rand -hex 32)"
+docker run --rm -p 8000:8000 -e TAVILY_API_KEY -e GROQ_API_KEY -e OPENAI_API_KEY -e FALLBACK_PROVIDER \
+  -e FALLBACK_EXTRACT_MODEL -e FALLBACK_WRITE_MODEL -e OPENAI_BUDGET_USD -e INTERNAL_API_KEY interview-brief-api
 ```
-One container runs both processes. Only Streamlit is exposed; the API listens on `127.0.0.1` inside the container. The image runs in production mode:
-- the API refuses to start without an `APP_ACCESS_CODE` of 16 or more characters;
-- each browser session sees only its own briefs;
+The image runs in production mode:
+- the API refuses to start without an `INTERNAL_API_KEY` of 32 or more characters;
+- the shared list of briefs is turned off, so a brief opens only by its own id;
 - new briefs are capped per day (`MAX_BRIEFS_PER_DAY`, default 5).
 
-### Deploy (Render, free)
-`render.yaml` describes one free web service built from the `Dockerfile`, with Streamlit's health check. In Render: **New, Blueprint**, pick this repo, and enter the four values it asks for (`TAVILY_API_KEY`, `GROQ_API_KEY`, `OPENAI_API_KEY`, and a new `APP_ACCESS_CODE`). Keys live only in Render's environment settings, never in the repo. The free instance has 512 MB of RAM and 0.1 CPU and sleeps after 15 minutes without traffic.
-
-### Deploy the API (Azure Container Apps, for the new web app in `web/`)
+### Deploy the API (Azure Container Apps)
 `Dockerfile.api` is the API on its own (uvicorn on port 8000, `REQUIRE_INTERNAL_KEY=1`). The **API image** workflow
-(`.github/workflows/image.yml`) builds it for linux/amd64 on every push to `web-ui` or `main` that touches the API and
+(`.github/workflows/image.yml`) builds it for linux/amd64 on every push to `main` that touches the API and
 pushes `ghcr.io/akankshab17/interview-brief-api:<git sha>` and `:latest` with the workflow's own token.
 `deploy/azure/app.template.yaml` defines the Container App: Consumption plan in canadacentral, 0.5 vCPU / 1 GiB,
 0 to 1 replica (one worker and SQLite), HTTPS only, startup/readiness/liveness probes on `/health`. The API keys and a
 fresh `INTERNAL_API_KEY` are Container App secrets: `deploy/azure/render_app.py` fills the template from `.env` into an
 owner-only file that is deleted after `az containerapp create --yaml`. The app scales to zero 300 s after the last
-request, and its disk (jobs, cache, daily count) starts empty after that, as on Render.
+request, and its disk (jobs, cache, daily count) starts empty after that.
 
 ```
 ENV_ID=$(az containerapp env show -n interview-brief-env -g interview-brief-rg --query id -o tsv)
@@ -190,6 +204,11 @@ az containerapp create -n interview-brief-api -g interview-brief-rg --yaml <priv
 # the key the web server needs (prints it: run it yourself, paste into Vercel)
 az containerapp secret show -n interview-brief-api -g interview-brief-rg --secret-name internal-api-key --query value -o tsv
 ```
+
+### Deploy the web app (Vercel)
+Import the repo into Vercel with **Root Directory** `web` and Node.js 24.x, and set `FASTAPI_URL` (the Azure URL),
+`INTERNAL_API_KEY` (the same key as the Container App), `APP_ACCESS_CODE` (16+ characters) and `SESSION_SECRET`
+(`openssl rand -hex 32`). Every push to `main` deploys it. Details in [web/README.md](web/README.md).
 
 ### Configuration
 All settings are in `.env` (copy `.env.example`). The main ones:
@@ -204,15 +223,16 @@ All settings are in `.env` (copy `.env.example`). The main ones:
 | `EXTRACT_CONCURRENCY` | 4 | Sources extracted in parallel (1 to 16) |
 | `FALLBACK_PROVIDER`, `FALLBACK_EXTRACT_MODEL`, `FALLBACK_WRITE_MODEL` | `openai`, `gpt-5.6-luna`, `gpt-5.4-mini` | Used only after a Groq daily limit |
 | `OPENAI_BUDGET_USD` | 3.00 | Stop using the fallback past this tracked spend |
-| `APP_ACCESS_CODE` | (blank) | If set, the web app and API require it |
+| `APP_ACCESS_CODE` | (blank) | If set on the API, it requires the code in `X-Access-Code`. The web app's own login code is set on Vercel |
 | `INTERNAL_API_KEY` | (blank) | If set, every API endpoint but `/health` requires it in `X-Internal-Key` (the Next.js server sends it) |
 | `REQUIRE_INTERNAL_KEY` | (off) | `1` = the API refuses to start without an `INTERNAL_API_KEY` of 32+ characters |
 | `MAX_BRIEFS_PER_DAY` | 5 | New briefs per UTC day in the web app (0 = no limit) |
 
 ### Tests and evals
 ```
-pytest                                          # 529 tests, no network calls
-RUN_DOCKER_TESTS=1 pytest tests/test_deploy.py  # also builds and runs the Docker image (needs Docker)
+pytest                                          # 521 tests, no network calls
+RUN_DOCKER_TESTS=1 pytest tests/test_deploy.py  # also builds and runs the API image (needs Docker)
+cd web && npm run typecheck && npm run lint && npm test && npm run test:e2e   # 116 Vitest tests + 1 Playwright test
 
 python evals/run_evals.py --record              # live: records search results and pages to evals/fixtures/
 python evals/run_evals.py                       # replay: no Tavily calls; compares with the last run and the baseline
@@ -225,11 +245,14 @@ Recorded fixtures hold third-party page text, so they are gitignored. Only the m
 **Limitations**
 - **Free-tier quotas.** Groq's free tier has daily token limits (separate for each model). Tavily's free plan is 1,000 credits a month, about 70 to 100 briefs. The OpenAI fallback costs real money, so I keep a prepaid balance with auto-reload off.
 - **Thin data for smaller companies.** Interview reports have to name the company in the title or URL, and many companies have few public reports. Cummins gets 2 interview facts. Reddit pages usually can't be fetched, so only their search snippets are used.
-- **No persistent storage on free hosting.** On Render's free tier the disk is wiped when the service sleeps or redeploys. Past briefs, the extraction cache and the daily brief count start from zero, so the daily limit only holds while the service stays awake.
+- **No persistent storage on free hosting.** The API's disk is wiped when it scales to zero or restarts. Past briefs, the extraction cache and the daily brief count start from zero, so the daily limit only holds while the API stays awake.
 - **Strict grounding.** A slightly altered quote is rejected even when the fact is true. The debug report lists every rejection so I can check.
 - **Finalize checks form, not meaning.** It verifies citations, numbers and labels, but it can't catch a sentence that shifts the meaning of a cited fact in plain words.
+- **Role-family mismatches.** The filter that matches interview reports to the role works on titles and keywords, so a neighbouring role can get through. A Software Engineer brief has cited Production Engineer reports, which describe a different loop.
+- **Occasional writer extrapolation.** The writer sometimes goes a step past its cited fact, for example turning one candidate's report into a general statement. Finalize catches missing citations and invented numbers, but not this.
 - **Hand-written heuristics.** Location, level, role family and source type are detected with word lists and regular expressions, and new cases sometimes need new entries.
 - **One brief at a time.** The API runs a single worker, because the LLM usage and fallback state are per run.
+- **Best-effort rate limits in the web app.** They live in each Vercel instance's memory. The API's daily cap is the real limit.
 
 **Roadmap**
 - An external database for jobs and the daily count, so they survive restarts on free hosting.

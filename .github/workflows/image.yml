@@ -5,7 +5,7 @@ name: API image
 
 on:
   push:
-    branches: [web-ui, main]
+    branches: [main]
     paths:
       - Dockerfile.api
       - .dockerignore

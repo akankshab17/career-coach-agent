@@ -6,10 +6,8 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-from streamlit.testing.v1 import AppTest
 
 import api
-import httpx
 from jobs import JobStore
 from test_api import REQ, T0, Clock, fake_runner
 
@@ -111,77 +109,22 @@ def test_private_mode_turns_off_the_shared_list(env, monkeypatch):
     assert env["client"].get(f"/briefs/{job_id}").status_code == 200  # a brief's own (unguessable) id still opens it
 
 
-def test_the_app_lists_only_this_sessions_briefs_in_private_mode(tmp_path, monkeypatch):
-    monkeypatch.setenv("PRIVATE_BRIEFS", "1")
-    monkeypatch.setenv("BRIEF_API_URL", "http://api.test")
-    app = api.create_app(store=JobStore(str(tmp_path / "jobs.db")), runner=fake_runner(), start_worker=True)
-    with TestClient(app) as client:
-        monkeypatch.setattr(httpx, "request", lambda method, url, headers=None, timeout=None, **kw:
-                            client.request(method, url.removeprefix("http://api.test"), headers=headers, **kw))
-        client.post("/briefs", json={**REQ, "company": "SomeoneElse"})  # another coach's brief
-        at = AppTest.from_file(str(ROOT / "app.py"), default_timeout=20).run()
-        assert not at.exception and not at.sidebar.warning
-        assert at.sidebar.header[0].value == "Your briefs"
-        at.text_input[0].input("Acme")
-        at.text_input[1].input("Software Engineer")
-        at.button[0].click()
-        at = at.run(timeout=20)
-        labels = [b.label for b in at.sidebar.button]
-        assert any(l.startswith("Acme · Software Engineer") for l in labels)
-        assert not any("SomeoneElse" in l for l in labels)
-
-
-def test_the_app_shows_the_daily_limit_message_as_is(tmp_path, monkeypatch):
-    monkeypatch.setenv("MAX_BRIEFS_PER_DAY", "1")
-    monkeypatch.setenv("BRIEF_API_URL", "http://api.test")
-    app = api.create_app(store=JobStore(str(tmp_path / "jobs.db")), runner=fake_runner(), start_worker=False)
-    with TestClient(app) as client:
-        monkeypatch.setattr(httpx, "request", lambda method, url, headers=None, timeout=None, **kw:
-                            client.request(method, url.removeprefix("http://api.test"), headers=headers, **kw))
-        client.post("/briefs", json={**REQ, "company": "First"})
-        at = AppTest.from_file(str(ROOT / "app.py"), default_timeout=20).run()
-        at.text_input[0].input("Acme")
-        at.text_input[1].input("Software Engineer")
-        at.button[0].click()
-        at = at.run(timeout=20)
-        assert any(e.value.startswith("Daily limit reached") for e in at.error)
-
-
 # ---- the image files ----
 
-def test_the_image_keeps_secrets_out_and_production_settings_on():
+def test_the_image_keeps_secrets_out():
     ignore = (ROOT / ".dockerignore").read_text().splitlines()
-    for entry in (".env", ".cache/", "evals/", "tests/", ".venv/", "*.debug.md"):
+    for entry in (".env", ".cache/", "evals/", "tests/", ".venv/", "*.debug.md", "web/", "scripts/"):
         assert entry in ignore, entry
-    docker = (ROOT / "Dockerfile").read_text()
-    for setting in ("REQUIRE_ACCESS_CODE=1", "PRIVATE_BRIEFS=1", "MAX_BRIEFS_PER_DAY=5", "USER user", "--uid 1000"):
-        assert setting in docker, setting
+    docker = (ROOT / "Dockerfile.api").read_text()
     assert ".env" not in [line.split()[1] for line in docker.splitlines() if line.startswith("COPY")]
-    start = (ROOT / "start.sh").read_text()
-    assert "--host 127.0.0.1 --port 8000" in start and "--server.address 0.0.0.0" in start  # only Streamlit is reachable
-    assert 'PORT="${PORT:-7860}"' in start and 'STARTUP_WAIT="${STARTUP_WAIT:-180}"' in start  # Render's 0.1 CPU starts slowly
-
-
-def test_the_render_blueprint_is_free_has_a_health_check_and_holds_no_secret_values():
-    import yaml
-
-    blueprint = yaml.safe_load((ROOT / "render.yaml").read_text())
-    (service,) = blueprint["services"]
-    assert (service["type"], service["runtime"], service["plan"]) == ("web", "docker", "free")
-    assert service["healthCheckPath"] == "/_stcore/health" and service["dockerfilePath"] == "./Dockerfile"
-    env = {e["key"]: e for e in service["envVars"]}
-    for secret in ("APP_ACCESS_CODE", "TAVILY_API_KEY", "GROQ_API_KEY", "OPENAI_API_KEY"):
-        assert env[secret] == {"key": secret, "sync": False}, secret  # asked for in Render's dashboard, never stored here
-    assert env["PORT"]["value"] == "10000" and env["FALLBACK_PROVIDER"]["value"] == "openai"
-    assert all("value" not in e or not str(e["value"]).startswith(("gsk_", "tvly-", "sk-")) for e in service["envVars"])
-    assert not (ROOT / "README.md").read_text().startswith("---")  # the Hugging Face header is gone
+    assert not (ROOT / "Dockerfile").exists() and not (ROOT / "render.yaml").exists()  # the Streamlit image is gone
 
 
 # ---- the container can write its .cache ----
 
 def test_the_dockerfile_hands_the_app_directory_and_cache_to_the_user_before_switching():
     """Local run failed: PermissionError on '.cache' because WORKDIR created /home/user/app owned by root."""
-    lines = [l.strip() for l in (ROOT / "Dockerfile").read_text().splitlines()]
+    lines = [l.strip() for l in (ROOT / "Dockerfile.api").read_text().splitlines()]
     instructions = " ".join(lines).replace("\\ ", " ")  # join continued lines
     user_at = next(i for i, l in enumerate(lines) if l == "USER user")
     before_user = " ".join(lines[:user_at])
@@ -208,23 +151,18 @@ def test_the_image_runs_as_uid_1000_and_can_write_its_cache():
     import subprocess
 
     tag = "interview-brief-test"
-    subprocess.run(["docker", "build", "-q", "-t", tag, str(ROOT)], check=True, capture_output=True, timeout=900)
+    subprocess.run(["docker", "build", "-q", "-f", str(ROOT / "Dockerfile.api"), "-t", tag, str(ROOT)],
+                   check=True, capture_output=True, timeout=900)
     probe = ("import os, sys; sys.path.insert(0, 'src'); from jobs import JobStore; JobStore(); "
              "open('.cache/extract-probe', 'w').write('x'); print(os.getuid(), sorted(os.listdir('.cache')))")
     out = subprocess.run(["docker", "run", "--rm", "--entrypoint", "python", tag, "-c", probe],
                          check=True, capture_output=True, text=True, timeout=120).stdout
     assert out.startswith("1000 ") and "jobs.db" in out and "extract-probe" in out
     refused = subprocess.run(["docker", "run", "--rm", tag], capture_output=True, text=True, timeout=120)
-    assert refused.returncode != 0 and "APP_ACCESS_CODE" in refused.stdout + refused.stderr
+    assert refused.returncode != 0 and "INTERNAL_API_KEY" in refused.stdout + refused.stderr
 
 
-def test_the_streamlit_toolbar_hides_deploy_and_developer_menu():
-    config = (ROOT / ".streamlit" / "config.toml").read_text()
-    assert 'toolbarMode = "viewer"' in config
-    assert "COPY --chown=user .streamlit/ .streamlit/" in (ROOT / "Dockerfile").read_text()  # the image needs it too
-
-
-# ---- Azure Container Apps: the API-only image and its app definition ----
+# ---- Azure Container Apps: the API image and its app definition ----
 
 def _render_app_module():
     import importlib.util
@@ -242,11 +180,8 @@ def test_the_api_image_runs_only_uvicorn_with_the_internal_key_required():
         assert setting in docker, setting
     assert 'CMD ["uvicorn", "--app-dir", "src", "--factory", "api:serve", "--host", "0.0.0.0", "--port", "8000"]' in docker
     copied = [line.split()[-2] for line in docker.splitlines() if line.startswith("COPY")]
-    assert copied == ["requirements.txt", "src/"]  # no app.py/Streamlit, no .env
+    assert copied == ["requirements.txt", "src/"]  # only the API, no .env
     assert "REQUIRE_ACCESS_CODE" not in docker  # login moved to the Next.js server
-    ignore = (ROOT / ".dockerignore").read_text().splitlines()
-    for entry in (".env", ".cache/", "web/", "scripts/"):
-        assert entry in ignore, entry
 
 
 def test_the_azure_app_definition_scales_to_zero_with_one_replica_https_and_probes():
@@ -305,7 +240,7 @@ def test_the_image_workflow_pushes_amd64_sha_and_latest_tags_with_the_workflow_t
 
     workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "image.yml").read_text())
     assert workflow["permissions"] == {"contents": "read", "packages": "write"}
-    assert set(workflow[True]["push"]["branches"]) == {"web-ui", "main"}  # YAML reads the key `on` as True
+    assert workflow[True]["push"]["branches"] == ["main"]  # YAML reads the key `on` as True
     steps = workflow["jobs"]["build"]["steps"]
     login = next(s for s in steps if s.get("uses", "").startswith("docker/login-action"))
     assert login["with"]["password"] == "${{ secrets.GITHUB_TOKEN }}"
